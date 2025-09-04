@@ -12,6 +12,7 @@ pub enum CharacterClass {
     Digit,
     Word,
     PositiveSet(Vec<char>),
+    NegativeSet(Vec<char>),
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +116,7 @@ fn char_matches_class(c: char, class: &CharacterClass) -> bool {
         // programming identifiers (e.g., variable and function names).
         CharacterClass::Word => c.is_ascii_alphanumeric() || c == '_',
         CharacterClass::PositiveSet(set) => set.binary_search(&c).is_ok(),
+        CharacterClass::NegativeSet(set) => set.binary_search(&c).is_err(),
     }
 }
 
@@ -288,8 +290,13 @@ fn postfix_to_nfa(postfix: &str) -> Nfa {
                     }
                     group_content.push(next_c);
                 }
-                let set = parse_char_group(&group_content);
-                nfa_stack.push(nfa_from_class(CharacterClass::PositiveSet(set)));
+                if group_content.starts_with('^') {
+                    let set = parse_char_group(&group_content[1..]);
+                    nfa_stack.push(nfa_from_class(CharacterClass::NegativeSet(set)));
+                } else {
+                    let set = parse_char_group(&group_content);
+                    nfa_stack.push(nfa_from_class(CharacterClass::PositiveSet(set)));
+                }
             }
             '|' => {
                 let b = nfa_stack.pop().unwrap();
@@ -509,4 +516,3 @@ fn nfa_optional(mut nfa: Nfa) -> Nfa {
         match_state,
     }
 }
-
