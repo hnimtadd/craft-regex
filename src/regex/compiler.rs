@@ -10,6 +10,7 @@ pub fn compile(pattern: &str) -> Nfa {
 #[derive(Debug, Clone)]
 pub enum CharacterClass {
     Digit,
+    Word,
 }
 
 #[derive(Debug, Clone)]
@@ -26,7 +27,9 @@ pub struct State {
 
 impl State {
     fn new() -> Self {
-        State { transitions: Vec::new() }
+        State {
+            transitions: Vec::new(),
+        }
     }
 }
 
@@ -107,6 +110,7 @@ impl Nfa {
 fn char_matches_class(c: char, class: &CharacterClass) -> bool {
     match class {
         CharacterClass::Digit => c.is_ascii_digit(),
+        CharacterClass::Word => c.is_ascii_alphabetic(),
     }
 }
 
@@ -179,8 +183,7 @@ fn to_postfix(pattern: &str) -> String {
                     while let Some(&op) = operators.last() {
                         if op != '(' && precedence(op) >= precedence(c) {
                             output.push(operators.pop().unwrap());
-                        }
-                        else {
+                        } else {
                             break;
                         }
                     }
@@ -191,8 +194,7 @@ fn to_postfix(pattern: &str) -> String {
                     while let Some(&op) = operators.last() {
                         if op != '(' && precedence(op) >= precedence(c) {
                             output.push(operators.pop().unwrap());
-                        }
-                        else {
+                        } else {
                             break;
                         }
                     }
@@ -203,8 +205,7 @@ fn to_postfix(pattern: &str) -> String {
                         while let Some(&op) = operators.last() {
                             if op != '(' && precedence(op) >= precedence('.') {
                                 output.push(operators.pop().unwrap());
-                            }
-                            else {
+                            } else {
                                 break;
                             }
                         }
@@ -258,6 +259,7 @@ fn postfix_to_nfa(postfix: &str) -> Nfa {
                 if let Some(escaped_char) = chars.next() {
                     match escaped_char {
                         'd' => nfa_stack.push(nfa_from_class(CharacterClass::Digit)),
+                        'w' => nfa_stack.push(nfa_from_class(CharacterClass::Word)),
                         _ => nfa_stack.push(nfa_from_literal(escaped_char)),
                     }
                 }
@@ -276,19 +278,29 @@ fn postfix_to_nfa(postfix: &str) -> Nfa {
 fn nfa_from_literal(c: char) -> Nfa {
     let mut states = vec![State::new(), State::new()];
     states[0].transitions.push((Transition::Literal(c), 1));
-    Nfa { states, start_state: 0, match_state: 1 }
+    Nfa {
+        states,
+        start_state: 0,
+        match_state: 1,
+    }
 }
 
 fn nfa_from_class(class: CharacterClass) -> Nfa {
     let mut states = vec![State::new(), State::new()];
     states[0].transitions.push((Transition::Class(class), 1));
-    Nfa { states, start_state: 0, match_state: 1 }
+    Nfa {
+        states,
+        start_state: 0,
+        match_state: 1,
+    }
 }
 
 fn nfa_concat(mut a: Nfa, mut b: Nfa) -> Nfa {
     let b_start_offset = a.states.len();
-    a.states[a.match_state].transitions.push((Transition::Epsilon, b.start_state + b_start_offset));
-    
+    a.states[a.match_state]
+        .transitions
+        .push((Transition::Epsilon, b.start_state + b_start_offset));
+
     for state in &mut b.states {
         for (_, to_idx) in &mut state.transitions {
             *to_idx += b_start_offset;
@@ -302,7 +314,7 @@ fn nfa_concat(mut a: Nfa, mut b: Nfa) -> Nfa {
 
 fn nfa_or(mut a: Nfa, mut b: Nfa) -> Nfa {
     let mut states = vec![State::new()];
-    
+
     let a_start_offset = states.len();
     for state in &mut a.states {
         for (_, to_idx) in &mut state.transitions {
@@ -322,13 +334,25 @@ fn nfa_or(mut a: Nfa, mut b: Nfa) -> Nfa {
     let match_state = states.len();
     states.push(State::new());
 
-    states[0].transitions.push((Transition::Epsilon, a.start_state + a_start_offset));
-    states[0].transitions.push((Transition::Epsilon, b.start_state + b_start_offset));
+    states[0]
+        .transitions
+        .push((Transition::Epsilon, a.start_state + a_start_offset));
+    states[0]
+        .transitions
+        .push((Transition::Epsilon, b.start_state + b_start_offset));
 
-    states[a.match_state + a_start_offset].transitions.push((Transition::Epsilon, match_state));
-    states[b.match_state + b_start_offset].transitions.push((Transition::Epsilon, match_state));
+    states[a.match_state + a_start_offset]
+        .transitions
+        .push((Transition::Epsilon, match_state));
+    states[b.match_state + b_start_offset]
+        .transitions
+        .push((Transition::Epsilon, match_state));
 
-    Nfa { states, start_state: 0, match_state }
+    Nfa {
+        states,
+        start_state: 0,
+        match_state,
+    }
 }
 
 fn nfa_kleene_star(mut nfa: Nfa) -> Nfa {
@@ -345,13 +369,25 @@ fn nfa_kleene_star(mut nfa: Nfa) -> Nfa {
     let match_state = states.len();
     states.push(State::new());
 
-    states[0].transitions.push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
-    states[0].transitions.push((Transition::Epsilon, match_state));
+    states[0]
+        .transitions
+        .push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
+    states[0]
+        .transitions
+        .push((Transition::Epsilon, match_state));
 
-    states[nfa.match_state + nfa_start_offset].transitions.push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
-    states[nfa.match_state + nfa_start_offset].transitions.push((Transition::Epsilon, match_state));
+    states[nfa.match_state + nfa_start_offset]
+        .transitions
+        .push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
+    states[nfa.match_state + nfa_start_offset]
+        .transitions
+        .push((Transition::Epsilon, match_state));
 
-    Nfa { states, start_state: 0, match_state }
+    Nfa {
+        states,
+        start_state: 0,
+        match_state,
+    }
 }
 
 fn nfa_kleene_plus(mut nfa: Nfa) -> Nfa {
@@ -368,11 +404,21 @@ fn nfa_kleene_plus(mut nfa: Nfa) -> Nfa {
     let match_state = states.len();
     states.push(State::new());
 
-    states[0].transitions.push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
-    states[nfa.match_state + nfa_start_offset].transitions.push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
-    states[nfa.match_state + nfa_start_offset].transitions.push((Transition::Epsilon, match_state));
+    states[0]
+        .transitions
+        .push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
+    states[nfa.match_state + nfa_start_offset]
+        .transitions
+        .push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
+    states[nfa.match_state + nfa_start_offset]
+        .transitions
+        .push((Transition::Epsilon, match_state));
 
-    Nfa { states, start_state: 0, match_state }
+    Nfa {
+        states,
+        start_state: 0,
+        match_state,
+    }
 }
 
 fn nfa_optional(mut nfa: Nfa) -> Nfa {
@@ -389,9 +435,20 @@ fn nfa_optional(mut nfa: Nfa) -> Nfa {
     let match_state = states.len();
     states.push(State::new());
 
-    states[0].transitions.push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
-    states[0].transitions.push((Transition::Epsilon, match_state));
-    states[nfa.match_state + nfa_start_offset].transitions.push((Transition::Epsilon, match_state));
+    states[0]
+        .transitions
+        .push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
+    states[0]
+        .transitions
+        .push((Transition::Epsilon, match_state));
+    states[nfa.match_state + nfa_start_offset]
+        .transitions
+        .push((Transition::Epsilon, match_state));
 
-    Nfa { states, start_state: 0, match_state }
+    Nfa {
+        states,
+        start_state: 0,
+        match_state,
+    }
 }
+
