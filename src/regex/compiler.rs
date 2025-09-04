@@ -11,6 +11,7 @@ pub fn compile(pattern: &str) -> Nfa {
 pub enum CharacterClass {
     Digit,
     Word,
+    PositiveSet(Vec<char>),
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +114,7 @@ fn char_matches_class(c: char, class: &CharacterClass) -> bool {
         // Underscore _ is included as it is considered part of a word in
         // programming identifiers (e.g., variable and function names).
         CharacterClass::Word => c.is_ascii_alphanumeric() || c == '_',
+        CharacterClass::PositiveSet(set) => set.binary_search(&c).is_ok(),
     }
 }
 
@@ -157,6 +159,26 @@ fn to_postfix(pattern: &str) -> String {
             concat_next = true;
         } else {
             match c {
+                '[' => {
+                    if concat_next {
+                        while let Some(&op) = operators.last() {
+                            if op != '(' && precedence(op) >= precedence('.') {
+                                output.push(operators.pop().unwrap());
+                            } else {
+                                break;
+                            }
+                        }
+                        operators.push('.');
+                    }
+                    output.push('[');
+                    while let Some(next_c) = chars.next() {
+                        output.push(next_c);
+                        if next_c == ']' {
+                            break;
+                        }
+                    }
+                    concat_next = true;
+                }
                 '(' => {
                     if concat_next {
                         while let Some(&op) = operators.last() {
@@ -229,12 +251,46 @@ fn to_postfix(pattern: &str) -> String {
 
 // --- Postfix to NFA Compilation ---
 
+fn parse_char_group(content: &str) -> Vec<char> {
+    let mut set = Vec::new();
+    let mut chars = content.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(&'-') = chars.peek() {
+            chars.next(); // consume '-'
+            if let Some(end_char) = chars.next() {
+                for i in c..=end_char {
+                    set.push(i);
+                }
+            } else {
+                set.push(c);
+                set.push('-');
+            }
+        } else {
+            set.push(c);
+        }
+    }
+    set.sort();
+    set.dedup();
+    set
+}
+
 fn postfix_to_nfa(postfix: &str) -> Nfa {
     let mut nfa_stack: Vec<Nfa> = Vec::new();
     let mut chars = postfix.chars();
 
     while let Some(c) = chars.next() {
         match c {
+            '[' => {
+                let mut group_content = String::new();
+                while let Some(next_c) = chars.next() {
+                    if next_c == ']' {
+                        break;
+                    }
+                    group_content.push(next_c);
+                }
+                let set = parse_char_group(&group_content);
+                nfa_stack.push(nfa_from_class(CharacterClass::PositiveSet(set)));
+            }
             '|' => {
                 let b = nfa_stack.pop().unwrap();
                 let a = nfa_stack.pop().unwrap();
