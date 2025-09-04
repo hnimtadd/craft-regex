@@ -16,10 +16,7 @@
           });
     in {
       devShells = forEachSystem ({ pkgs }: {
-        default = pkgs.mkShellNoCC { packages = with pkgs; [
- cargo
-                    rustc
-            ]; };
+        default = pkgs.mkShellNoCC { packages = with pkgs; [ cargo rustc ]; };
       });
     };
 }
