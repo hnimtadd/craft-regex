@@ -17,6 +17,7 @@ fn main() {
     io::stdin().read_line(&mut input_line).unwrap();
 
     let nfa = regex::compiler::compile(&pattern);
+
     if nfa.is_match(&input_line.trim_end()) {
         process::exit(0);
     } else {
