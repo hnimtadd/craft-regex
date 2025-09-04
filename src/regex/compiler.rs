@@ -110,7 +110,9 @@ impl Nfa {
 fn char_matches_class(c: char, class: &CharacterClass) -> bool {
     match class {
         CharacterClass::Digit => c.is_ascii_digit(),
-        CharacterClass::Word => c.is_ascii_alphabetic(),
+        // Underscore _ is included as it is considered part of a word in
+        // programming identifiers (e.g., variable and function names).
+        CharacterClass::Word => c.is_ascii_alphabetic() || c == '_',
     }
 }
 
