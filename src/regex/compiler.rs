@@ -22,12 +22,18 @@ pub fn compile(pattern: &str) -> NFA {
     }
 
     let postfix = to_postfix(pattern_slice);
-    println!("postfix {postfix}");
+    println!("postfix {:?}", postfix);
+    return NFA {
+        states: Vec::new(),
+        start_state: 0,
+        match_state: 0,
+        anchors,
+    };
 
-    let mut nfa = postfix_to_nfa(&postfix);
-    nfa.anchors = anchors;
-
-    nfa
+    // let mut nfa = postfix_to_nfa(&postfix);
+    // nfa.anchors = anchors;
+    //
+    // nfa
 }
 
 // --- Data Structures for the NFA ---
@@ -35,11 +41,10 @@ pub fn compile(pattern: &str) -> NFA {
 /// Represents a class of characters. This is more general than a single literal character.
 #[derive(Debug, Clone)]
 pub enum CharacterClass {
-    Digit,                  // Represents `\d`
-    Word,                   // Represents `\w`
-    Any,                    // Represents '.'
-    PositiveSet(Vec<char>), // Represents `[abc]`
-    NegativeSet(Vec<char>), // Represents `[^abc]`
+    Digit,                                   // Represents `\d`
+    Word,                                    // Represents `\w`
+    Any,                                     // Represents '.'
+    Set { data: Vec<char>, positive: bool }, // Represents `[^abc]` or `[abc]`
 }
 
 /// Represents a transition between states in the NFA.
@@ -52,6 +57,21 @@ pub enum Transition {
     Literal(char),
     // A transition on a class of characters (e.g., any digit).
     Class(CharacterClass),
+    CaptureStart { index: usize },
+    CaptureEnd { index: usize },
+}
+
+#[derive(Debug, Clone)]
+pub enum Token {
+    Literal(char),         // A literal char like 'a'
+    Class(CharacterClass), // A character class like `\\d` or `[a-z]`
+    Concat,                // The internal concat operator: #
+    Alternation,           // The | operator
+    ZeroOrMore,            // The * operator
+    OneOrMore,             // The + operator
+    ZeroOrOne,             // The ? operator
+    CaptureStart(usize),   // A ( mark the start of the capture group
+    CaptureEnd(usize),     // A ) mark the end of the capture group
 }
 
 bitflags! {
@@ -63,6 +83,12 @@ bitflags! {
         const END_OF_STRING   = 0b00000010; // Represents $
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct MatchResult {
+    groups: Vec<(usize, usize)>,
+}
+
 /// Represents a single state in the NFA.
 #[derive(Debug, Clone)]
 pub struct State {
@@ -252,21 +278,27 @@ fn char_matches_class(c: char, class: &CharacterClass) -> bool {
         CharacterClass::Word => c.is_ascii_alphanumeric() || c == '_',
         CharacterClass::Any => true,
         // Assumes the Vec is sorted. `binary_search` is efficient.
-        CharacterClass::PositiveSet(set) => set.binary_search(&c).is_ok(),
-        CharacterClass::NegativeSet(set) => set.binary_search(&c).is_err(),
+        CharacterClass::Set { data, positive } => {
+            if *positive {
+                data.binary_search(&c).is_ok()
+            } else {
+                data.binary_search(&c).is_err()
+            }
+        }
     }
 }
 
 // --- Infix to Postfix Conversion (Shunting-yard Algorithm) ---
 
 /// Returns the precedence of a regex operator. Higher numbers mean higher precedence.
-fn precedence(op: char) -> u8 {
+fn precedence(op: Token) -> u8 {
     match op {
-        '|' => 1,             // Alternation
-        '#' => 2,             // Concatenation (explicitly inserted)
-        '?' | '*' | '+' => 3, // Quantifiers
-        '.' => 4,             // Any
-        _ => 0,               // Not an operator
+        Token::CaptureStart(_) => 0, // capture start op
+        Token::Alternation => 1,     // Alternation
+        Token::Concat => 2,          // Concatenation (explicitly inserted)
+        Token::ZeroOrOne | Token::ZeroOrMore | Token::OneOrMore => 3, // Quantifiers
+        Token::Class(CharacterClass::Any) => 4, // Any
+        _ => 0,                      // Not our expected operator
     }
 }
 
@@ -274,33 +306,36 @@ fn precedence(op: char) -> u8 {
 /// This uses a modified Shunting-yard algorithm.
 /// This step makes it much easier to compile to an NFA, as operators appear after their operands.
 /// It also explicitly inserts a `.` character for concatenation (e.g., "ab" becomes "a.b").
-fn to_postfix(pattern: &str) -> String {
-    let mut output = String::new();
-    let mut operators = Vec::new(); // Operator stack
+fn to_postfix(pattern: &str) -> Vec<Token> {
+    let mut output = Vec::<Token>::new();
+    let mut operators = Vec::<Token>::new(); // Operator stack
     let mut concat_next = false;
 
-    let mut chars = pattern.chars().peekable();
+    let mut chars = pattern.chars().into_iter().enumerate();
 
-    while let Some(c) = chars.next() {
+    while let Some((i, c)) = chars.next() {
         if c.is_alphanumeric() || c == '\\' {
             if concat_next {
                 // If the previous token was a literal or a group, we need to insert a concat operator.
                 while let Some(&op) = operators.last() {
-                    if op != '(' && precedence(op) >= precedence(SEPARATOR) {
+                    if precedence(op) >= precedence(Token::Concat) {
                         output.push(operators.pop().unwrap());
                     } else {
                         break;
                     }
                 }
-                operators.push(SEPARATOR);
+                operators.push(Token::Concat);
             }
             if c == '\\' {
-                if let Some(escaped) = chars.next() {
-                    output.push('\\');
-                    output.push(escaped);
+                if let Some((_, escaped)) = chars.next() {
+                    match escaped {
+                        'd' => output.push(Token::Class(CharacterClass::Digit)),
+                        'w' => output.push(Token::Class(CharacterClass::Word)),
+                        _ => {}
+                    }
                 }
             } else {
-                output.push(c);
+                output.push(Token::Literal(c));
             }
             concat_next = true;
         } else {
@@ -308,55 +343,67 @@ fn to_postfix(pattern: &str) -> String {
                 '.' => {
                     if concat_next {
                         while let Some(&op) = operators.last() {
-                            if op != '(' && precedence(op) >= precedence(SEPARATOR) {
+                            if precedence(op) >= precedence(Token::Concat) {
                                 output.push(operators.pop().unwrap());
                             } else {
                                 break;
                             }
                         }
-                        operators.push(SEPARATOR);
+                        operators.push(Token::Concat);
                     }
-                    operators.push(c);
+                    operators.push(Token::Class(CharacterClass::Any));
                     concat_next = true;
                 }
                 '[' => {
                     if concat_next {
                         while let Some(&op) = operators.last() {
-                            if op != '(' && precedence(op) >= precedence(SEPARATOR) {
+                            if precedence(op) >= precedence(Token::Concat) {
                                 output.push(operators.pop().unwrap());
                             } else {
                                 break;
                             }
                         }
-                        operators.push(SEPARATOR);
+                        operators.push(Token::Concat);
                     }
                     // Pass the entire character group through untouched.
-                    output.push('[');
-                    while let Some(next_c) = chars.next() {
-                        output.push(next_c);
+                    let mut set = Vec::new();
+                    while let Some((_, next_c)) = chars.next() {
+                        set.push(next_c);
                         if next_c == ']' {
                             break;
                         }
+                    }
+                    if set[0] == '^' {
+                        set.remove(0);
+                        output.push(Token::Class(CharacterClass::Set {
+                            data: set,
+                            positive: false,
+                        }))
+                    } else {
+                        output.push(Token::Class(CharacterClass::Set {
+                            data: set,
+                            positive: false,
+                        }))
                     }
                     concat_next = true;
                 }
                 '(' => {
                     if concat_next {
                         while let Some(&op) = operators.last() {
-                            if op != '(' && precedence(op) >= precedence(SEPARATOR) {
+                            if precedence(op) >= precedence(Token::Concat) {
                                 output.push(operators.pop().unwrap());
                             } else {
                                 break;
                             }
                         }
-                        operators.push(SEPARATOR);
+                        operators.push(Token::Concat);
                     }
-                    operators.push(c);
+                    operators.push(Token::CaptureEnd(i));
                     concat_next = false;
                 }
                 ')' => {
                     while let Some(op) = operators.pop() {
-                        if op == '(' {
+                        if matches!(op, Token::CaptureStart(_)) {
                             break;
                         }
                         output.push(op);
@@ -366,38 +413,60 @@ fn to_postfix(pattern: &str) -> String {
                 '|' => {
                     concat_next = false;
                     while let Some(&op) = operators.last() {
-                        if op != '(' && precedence(op) >= precedence(c) {
+                        if precedence(op) >= precedence(Token::Concat) {
                             output.push(operators.pop().unwrap());
                         } else {
                             break;
                         }
                     }
-                    operators.push(c);
+                    operators.push(Token::Alternation);
                 }
-                '?' | '*' | '+' => {
+                '?' => {
                     concat_next = true;
                     while let Some(&op) = operators.last() {
-                        if op != '(' && precedence(op) >= precedence(c) {
+                        if precedence(op) >= precedence(Token::Concat) {
                             output.push(operators.pop().unwrap());
                         } else {
                             break;
                         }
                     }
-                    operators.push(c);
+                    operators.push(Token::ZeroOrOne);
+                }
+                '*' => {
+                    concat_next = true;
+                    while let Some(&op) = operators.last() {
+                        if precedence(op) >= precedence(Token::Concat) {
+                            output.push(operators.pop().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+                    operators.push(Token::ZeroOrMore);
+                }
+                '+' => {
+                    concat_next = true;
+                    while let Some(&op) = operators.last() {
+                        if precedence(op) >= precedence(Token::Concat) {
+                            output.push(operators.pop().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+                    operators.push(Token::OneOrMore);
                 }
                 _ => {
                     // Any other character is treated as a literal.
                     if concat_next {
                         while let Some(&op) = operators.last() {
-                            if op != '(' && precedence(op) >= precedence(SEPARATOR) {
+                            if precedence(op) >= precedence(Token::Concat) {
                                 output.push(operators.pop().unwrap());
                             } else {
                                 break;
                             }
                         }
-                        operators.push(SEPARATOR);
+                        operators.push(Token::Concat);
                     }
-                    output.push(c);
+                    output.push(Token::Concat);
                     concat_next = true;
                 }
             }
@@ -465,13 +534,13 @@ fn postfix_to_nfa(postfix: &str) -> NFA {
                     group_content.push(next_c);
                 }
 
-                if group_content.starts_with('^') {
-                    let set = parse_char_group(&group_content[1..]);
-                    nfa_stack.push(nfa_from_class(CharacterClass::NegativeSet(set)));
-                } else {
-                    let set = parse_char_group(&group_content);
-                    nfa_stack.push(nfa_from_class(CharacterClass::PositiveSet(set)));
-                }
+                // if group_content.starts_with('^') {
+                //     let set = parse_char_group(&group_content[1..]);
+                //     nfa_stack.push(nfa_from_class(CharacterClass::Set(set)));
+                // } else {
+                //     let set = parse_char_group(&group_content);
+                //     nfa_stack.push(nfa_from_class(CharacterClass::Set(set)));
+                // }
             }
             '|' => {
                 let b = nfa_stack.pop().unwrap();
