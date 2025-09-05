@@ -1,53 +1,46 @@
 use bitflags::bitflags;
 
-static SEPARATOR: char = '#';
-
 // The main public function of the compiler module.
-// It orchestrates the two-step compilation process:
-// 1. Convert the human-readable infix regex pattern into a postfix notation (RPN).
-// 2. Compile the postfix expression into a Nondeterministic Finite Automaton (NFA).
+// It orchestrates the three-pass compilation process.
 pub fn compile(pattern: &str) -> NFA {
     let mut anchors = Anchors::empty();
     let mut pattern_slice = pattern;
 
-    // Early detect start of string and end of string anchors.
-    // This is hack, but we will refactor it later.
-    if pattern.starts_with('^') {
+    // Pass 0: Detect and strip anchors from the raw pattern string.
+    if pattern_slice.starts_with('^') {
         anchors |= Anchors::START_OF_STRING;
         pattern_slice = &pattern_slice[1..];
     }
-    if pattern.ends_with('$') {
+    if pattern_slice.ends_with('$') {
         anchors |= Anchors::END_OF_STRING;
         pattern_slice = &pattern_slice[..pattern_slice.len() - 1];
     }
 
-    let postfix = to_postfix(pattern_slice);
-    println!("postfix {:?}", postfix);
-    return NFA {
-        states: Vec::new(),
-        start_state: 0,
-        match_state: 0,
-        anchors,
-    };
+    // Pass 1: Tokenize the pattern string into a sequence of Tokens.
+    let tokens = tokenize(pattern_slice);
+    // Pass 2: Insert explicit concatenation tokens where necessary.
+    let tokens_with_concat = insert_concatenation(tokens);
+    // Pass 3: Reorder the tokens into postfix (RPN) order using Shunting-yard.
+    let postfix_tokens = shunting_yard(tokens_with_concat);
 
-    // let mut nfa = postfix_to_nfa(&postfix);
-    // nfa.anchors = anchors;
-    //
-    // nfa
+    // Compile the final token stream into an NFA.
+    let mut nfa = postfix_to_nfa(&postfix_tokens);
+    // Attach the detected anchors to the final NFA.
+    nfa.anchors = anchors;
+
+    nfa
 }
 
-// --- Data Structures for the NFA ---
+// --- Data Structures ---
 
-/// Represents a class of characters. This is more general than a single literal character.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CharacterClass {
-    Digit,                                   // Represents `\d`
-    Word,                                    // Represents `\w`
-    Any,                                     // Represents '.'
-    Set { data: Vec<char>, positive: bool }, // Represents `[^abc]` or `[abc]`
+    Digit,                                      // Represents `\d`
+    Word,                                       // Represents `\w`
+    Any,                                        // Represents '.'
+    Set { data: Vec<char>, is_positive: bool }, // Represents `[^abc]` or `[abc]`
 }
 
-/// Represents a transition between states in the NFA.
 #[derive(Debug, Clone)]
 pub enum Transition {
     // An epsilon transition allows the NFA to change state without consuming a character.
@@ -57,11 +50,9 @@ pub enum Transition {
     Literal(char),
     // A transition on a class of characters (e.g., any digit).
     Class(CharacterClass),
-    CaptureStart { index: usize },
-    CaptureEnd { index: usize },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Literal(char),         // A literal char like 'a'
     Class(CharacterClass), // A character class like `\\d` or `[a-z]`
@@ -78,15 +69,10 @@ bitflags! {
     // Define a struct that will hold the flags.
     // `Anchors` will behave like a regular struct but with bitwise operator support.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct Anchors: u8 { // u8 is enough for up to 8 flags
-        const START_OF_STRING = 0b00000001; // Represents ^
-        const END_OF_STRING   = 0b00000010; // Represents $
+    pub struct Anchors: u8 { // u8 is enough for up to 8 flags.
+        const START_OF_STRING = 0b00000001;
+        const END_OF_STRING   = 0b00000010;
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct MatchResult {
-    groups: Vec<(usize, usize)>,
 }
 
 /// Represents a single state in the NFA.
@@ -121,6 +107,8 @@ pub struct NFA {
     pub anchors: Anchors,
 }
 
+// --- NFA Simulation ---
+
 impl NFA {
     pub fn new() -> Self {
         NFA {
@@ -142,95 +130,62 @@ impl NFA {
     /// Simulates the NFA against an input string to check for a match.
     /// This search a match if the pattern appears anywhere in the string (like `grep`).
     fn run_search(&self, input: &str) -> bool {
-        // `current_states` holds the set of all states the NFA is currently in.
         let mut current_states = self.get_epsilon_closure(vec![self.start_state]);
 
-        // Handle patterns that can match an empty string (e.g., "a*").
-        if current_states.contains(&self.match_state) {
-            return true;
-        }
-
-        // Process each character of the input string.
-        for c in input.chars() {
-            let next_raw_states = self.step(current_states, c);
-
-            // After processing a character, we calculate the new set of states.
-            current_states = self.get_epsilon_closure(next_raw_states);
-
-            // The key logic for substring matching.
-            // After processing a character, we calculate the new set of states.
-            // We also always include the NFA's main start state to allow for new matches
-            // to begin at any point in the input string.
-            current_states.extend(self.get_epsilon_closure(vec![self.start_state]));
-            current_states.sort();
-            current_states.dedup();
-
-            // If an end anchor exists, we CANNOT return early. We must consume the whole string.
-            // If there is no end anchor, we can return as soon as a match is found.
-            if self.anchors.contains(Anchors::END_OF_STRING) {
-                continue;
-            }
-
-            // If the set of current states includes the final match state, we have found a match.
+        if !self.anchors.contains(Anchors::END_OF_STRING) {
             if current_states.contains(&self.match_state) {
                 return true;
             }
         }
-        // If the set of current states includes the final match state, we have found a match.
-        if current_states.contains(&self.match_state) {
-            return true;
+
+        for c in input.chars() {
+            let next_raw_states = self.step_state(&current_states, c);
+            current_states = self.get_epsilon_closure(next_raw_states);
+            current_states.extend(self.get_epsilon_closure(vec![self.start_state]));
+            current_states.sort();
+            current_states.dedup();
+
+            if !self.anchors.contains(Anchors::END_OF_STRING) {
+                if current_states.contains(&self.match_state) {
+                    return true;
+                }
+            }
         }
-
-        // If we reach the end of the input string without finding a match.
-        false
+        current_states.contains(&self.match_state)
     }
-
     /// Simulates the NFA against an input string to check for a match.
     /// This match the string in a stricter anchored awared way.
     fn run_match(&self, input: &str) -> bool {
         // `current_states` holds the set of all states the NFA is currently in.
         let mut current_states = self.get_epsilon_closure(vec![self.start_state]);
 
-        // Handle patterns that can match an empty string (e.g., "a*").
-        if current_states.contains(&self.match_state) {
-            return true;
+        if input.is_empty() {
+            return current_states.contains(&self.match_state);
         }
 
-        // Process each character of the input string.
         for c in input.chars() {
-            let next_raw_states = self.step(current_states, c);
-
-            // The key logic for matching.
-            // After processing a character, we calculate the new set of states.
+            let next_raw_states = self.step_state(&current_states, c);
             current_states = self.get_epsilon_closure(next_raw_states);
+
             if current_states.is_empty() {
                 return false;
             }
 
             // If an end anchor exists, we CANNOT return early. We must consume the whole string.
             // If there is no end anchor, we can return as soon as a match is found.
-            if self.anchors.contains(Anchors::END_OF_STRING) {
-                continue;
-            }
-
-            // If the set of current states includes the final match state, we have found a match.
-            if current_states.contains(&self.match_state) {
-                return true;
+            if !self.anchors.contains(Anchors::END_OF_STRING) {
+                // If the set of current states includes the final match state, we have found a match.
+                if current_states.contains(&self.match_state) {
+                    return true;
+                }
             }
         }
-        // If the set of current states includes the final match state, we have found a match.
-        if current_states.contains(&self.match_state) {
-            return true;
-        }
-
-        // If we reach the end of the input string without finding a match.
-        false
+        current_states.contains(&self.match_state)
     }
 
-    fn step(&self, current_states: Vec<usize>, c: char) -> Vec<usize> {
+    fn step_state(&self, current_states: &[usize], c: char) -> Vec<usize> {
         let mut next_states = Vec::new();
-        // For each current state, find all possible next states based on the character `c`.
-        for &state_idx in &current_states {
+        for &state_idx in current_states {
             for (transition, next_state_idx) in &self.states[state_idx].transitions {
                 match transition {
                     Transition::Literal(tc) if *tc == c => {
@@ -273,17 +228,11 @@ impl NFA {
 fn char_matches_class(c: char, class: &CharacterClass) -> bool {
     match class {
         CharacterClass::Digit => c.is_ascii_digit(),
-        // Underscore _ is included as it is considered part of a word in
-        // programming identifiers (e.g., variable and function names).
         CharacterClass::Word => c.is_ascii_alphanumeric() || c == '_',
         CharacterClass::Any => true,
-        // Assumes the Vec is sorted. `binary_search` is efficient.
-        CharacterClass::Set { data, positive } => {
-            if *positive {
-                data.binary_search(&c).is_ok()
-            } else {
-                data.binary_search(&c).is_err()
-            }
+        CharacterClass::Set { data, is_positive } => {
+            let found = data.binary_search(&c).is_ok();
+            *is_positive == found
         }
     }
 }
@@ -291,189 +240,137 @@ fn char_matches_class(c: char, class: &CharacterClass) -> bool {
 // --- Infix to Postfix Conversion (Shunting-yard Algorithm) ---
 
 /// Returns the precedence of a regex operator. Higher numbers mean higher precedence.
-fn precedence(op: Token) -> u8 {
-    match op {
-        Token::CaptureStart(_) => 0, // capture start op
-        Token::Alternation => 1,     // Alternation
-        Token::Concat => 2,          // Concatenation (explicitly inserted)
-        Token::ZeroOrOne | Token::ZeroOrMore | Token::OneOrMore => 3, // Quantifiers
-        Token::Class(CharacterClass::Any) => 4, // Any
-        _ => 0,                      // Not our expected operator
+fn precedence(token: &Token) -> u8 {
+    match token {
+        Token::Alternation => 1,
+        Token::Concat => 2,
+        Token::ZeroOrOne | Token::ZeroOrMore | Token::OneOrMore => 3,
+        _ => 0,
     }
 }
 
-/// Converts an infix regex pattern to a postfix (Reverse Polish Notation) expression.
-/// This uses a modified Shunting-yard algorithm.
-/// This step makes it much easier to compile to an NFA, as operators appear after their operands.
-/// It also explicitly inserts a `.` character for concatenation (e.g., "ab" becomes "a.b").
-fn to_postfix(pattern: &str) -> Vec<Token> {
-    let mut output = Vec::<Token>::new();
-    let mut operators = Vec::<Token>::new(); // Operator stack
-    let mut concat_next = false;
+/// Pass 1: Scan the raw string and convert it into a vector of Tokens.
+fn tokenize(pattern: &str) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    let mut chars = pattern.chars().peekable();
+    let mut capture_group_count = 0;
 
-    let mut chars = pattern.chars().into_iter().enumerate();
+    while let Some(c) = chars.next() {
+        match c {
+            '|' => tokens.push(Token::Alternation),
+            '*' => tokens.push(Token::ZeroOrMore),
+            '+' => tokens.push(Token::OneOrMore),
+            '?' => tokens.push(Token::ZeroOrOne),
+            '.' => tokens.push(Token::Class(CharacterClass::Any)),
+            '(' => {
+                capture_group_count += 1;
+                tokens.push(Token::CaptureStart(capture_group_count));
+            }
+            ')' => tokens.push(Token::CaptureEnd(0)), // Index is adjusted later
+            '[' => {
+                let mut set = Vec::new();
+                let positive = chars.peek() != Some(&'^');
+                if !positive {
+                    chars.next();
+                } // Consume '^'
 
-    while let Some((i, c)) = chars.next() {
-        if c.is_alphanumeric() || c == '\\' {
-            if concat_next {
-                // If the previous token was a literal or a group, we need to insert a concat operator.
-                while let Some(&op) = operators.last() {
-                    if precedence(op) >= precedence(Token::Concat) {
+                while let Some(sc) = chars.next() {
+                    if sc == ']' {
+                        break;
+                    }
+                    set.push(sc);
+                }
+                set.sort();
+                set.dedup();
+                tokens.push(Token::Class(CharacterClass::Set {
+                    data: set,
+                    is_positive: positive,
+                }));
+            }
+            '\\' => {
+                if let Some(escaped) = chars.next() {
+                    match escaped {
+                        'd' => tokens.push(Token::Class(CharacterClass::Digit)),
+                        'w' => tokens.push(Token::Class(CharacterClass::Word)),
+                        _ => tokens.push(Token::Literal(escaped)),
+                    }
+                }
+            }
+            _ => tokens.push(Token::Literal(c)),
+        }
+    }
+    tokens
+}
+
+/// Pass 2: Insert explicit Concat tokens where concatenation is implicit.
+fn insert_concatenation(tokens: Vec<Token>) -> Vec<Token> {
+    let mut result = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        result.push(token.clone());
+        if i + 1 < tokens.len() {
+            let next_token = &tokens[i + 1];
+            let is_current_operand = matches!(
+                token,
+                Token::Literal(_)
+                    | Token::Class(_)
+                    | Token::CaptureEnd(_)
+                    | Token::ZeroOrMore
+                    | Token::OneOrMore
+                    | Token::ZeroOrOne
+            );
+            let is_next_operand = matches!(
+                next_token,
+                Token::Literal(_) | Token::Class(_) | Token::CaptureStart(_)
+            );
+
+            if is_current_operand && is_next_operand {
+                result.push(Token::Concat);
+            }
+        }
+    }
+    result
+}
+
+/// Pass 3: Reorder tokens from infix to postfix using Shunting-yard.
+fn shunting_yard(tokens: Vec<Token>) -> Vec<Token> {
+    let mut output = Vec::new();
+    let mut operators = Vec::new();
+
+    for token in tokens {
+        match token {
+            Token::Literal(_) | Token::Class(_) => output.push(token),
+            Token::Concat
+            | Token::Alternation
+            | Token::ZeroOrMore
+            | Token::OneOrMore
+            | Token::ZeroOrOne => {
+                while let Some(top_op) = operators.last() {
+                    if matches!(top_op, Token::CaptureStart(_)) {
+                        break;
+                    }
+                    if precedence(top_op) >= precedence(&token) {
                         output.push(operators.pop().unwrap());
                     } else {
                         break;
                     }
                 }
-                operators.push(Token::Concat);
+                operators.push(token);
             }
-            if c == '\\' {
-                if let Some((_, escaped)) = chars.next() {
-                    match escaped {
-                        'd' => output.push(Token::Class(CharacterClass::Digit)),
-                        'w' => output.push(Token::Class(CharacterClass::Word)),
-                        _ => {}
+            Token::CaptureStart(_) => operators.push(token),
+            Token::CaptureEnd(_) => {
+                while let Some(top_op) = operators.last() {
+                    if matches!(top_op, Token::CaptureStart(_)) {
+                        break;
                     }
+                    output.push(operators.pop().unwrap());
                 }
-            } else {
-                output.push(Token::Literal(c));
-            }
-            concat_next = true;
-        } else {
-            match c {
-                '.' => {
-                    if concat_next {
-                        while let Some(&op) = operators.last() {
-                            if precedence(op) >= precedence(Token::Concat) {
-                                output.push(operators.pop().unwrap());
-                            } else {
-                                break;
-                            }
-                        }
-                        operators.push(Token::Concat);
-                    }
-                    operators.push(Token::Class(CharacterClass::Any));
-                    concat_next = true;
-                }
-                '[' => {
-                    if concat_next {
-                        while let Some(&op) = operators.last() {
-                            if precedence(op) >= precedence(Token::Concat) {
-                                output.push(operators.pop().unwrap());
-                            } else {
-                                break;
-                            }
-                        }
-                        operators.push(Token::Concat);
-                    }
-                    // Pass the entire character group through untouched.
-                    let mut set = Vec::new();
-                    while let Some((_, next_c)) = chars.next() {
-                        set.push(next_c);
-                        if next_c == ']' {
-                            break;
-                        }
-                    }
-                    if set[0] == '^' {
-                        set.remove(0);
-                        output.push(Token::Class(CharacterClass::Set {
-                            data: set,
-                            positive: false,
-                        }))
-                    } else {
-                        output.push(Token::Class(CharacterClass::Set {
-                            data: set,
-                            positive: false,
-                        }))
-                    }
-                    concat_next = true;
-                }
-                '(' => {
-                    if concat_next {
-                        while let Some(&op) = operators.last() {
-                            if precedence(op) >= precedence(Token::Concat) {
-                                output.push(operators.pop().unwrap());
-                            } else {
-                                break;
-                            }
-                        }
-                        operators.push(Token::Concat);
-                    }
-                    operators.push(Token::CaptureEnd(i));
-                    concat_next = false;
-                }
-                ')' => {
-                    while let Some(op) = operators.pop() {
-                        if matches!(op, Token::CaptureStart(_)) {
-                            break;
-                        }
-                        output.push(op);
-                    }
-                    concat_next = true;
-                }
-                '|' => {
-                    concat_next = false;
-                    while let Some(&op) = operators.last() {
-                        if precedence(op) >= precedence(Token::Concat) {
-                            output.push(operators.pop().unwrap());
-                        } else {
-                            break;
-                        }
-                    }
-                    operators.push(Token::Alternation);
-                }
-                '?' => {
-                    concat_next = true;
-                    while let Some(&op) = operators.last() {
-                        if precedence(op) >= precedence(Token::Concat) {
-                            output.push(operators.pop().unwrap());
-                        } else {
-                            break;
-                        }
-                    }
-                    operators.push(Token::ZeroOrOne);
-                }
-                '*' => {
-                    concat_next = true;
-                    while let Some(&op) = operators.last() {
-                        if precedence(op) >= precedence(Token::Concat) {
-                            output.push(operators.pop().unwrap());
-                        } else {
-                            break;
-                        }
-                    }
-                    operators.push(Token::ZeroOrMore);
-                }
-                '+' => {
-                    concat_next = true;
-                    while let Some(&op) = operators.last() {
-                        if precedence(op) >= precedence(Token::Concat) {
-                            output.push(operators.pop().unwrap());
-                        } else {
-                            break;
-                        }
-                    }
-                    operators.push(Token::OneOrMore);
-                }
-                _ => {
-                    // Any other character is treated as a literal.
-                    if concat_next {
-                        while let Some(&op) = operators.last() {
-                            if precedence(op) >= precedence(Token::Concat) {
-                                output.push(operators.pop().unwrap());
-                            } else {
-                                break;
-                            }
-                        }
-                        operators.push(Token::Concat);
-                    }
-                    output.push(Token::Concat);
-                    concat_next = true;
+                if !operators.is_empty() {
+                    operators.pop();
                 }
             }
         }
     }
 
-    // Pop any remaining operators from the stack to the output.
     while let Some(op) = operators.pop() {
         output.push(op);
     }
@@ -481,109 +378,45 @@ fn to_postfix(pattern: &str) -> Vec<Token> {
     output
 }
 
-// --- Postfix to NFA Compilation ---
-
-/// Parses the content of a character group (e.g., "a-z0-9").
-/// It handles single characters and character ranges.
-fn parse_char_group(content: &str) -> Vec<char> {
-    let mut set = Vec::new();
-    let mut chars = content.chars().peekable();
-    while let Some(c) = chars.next() {
-        // Check for a range like `a-z`.
-        if let Some(&'-') = chars.peek() {
-            chars.next(); // consume '-'
-            if let Some(end_char) = chars.next() {
-                for i in c..=end_char {
-                    set.push(i);
-                }
-            } else {
-                // Handle a trailing '-' as a literal.
-                set.push(c);
-                set.push('-');
-            }
-        } else {
-            set.push(c);
-        }
-    }
-    set.sort();
-    set.dedup();
-    set
-}
-
 /// Compiles a postfix expression into an NFA.
-/// It processes the expression token by token, building up NFA fragments on a stack.
-fn postfix_to_nfa(postfix: &str) -> NFA {
+fn postfix_to_nfa(postfix_tokens: &[Token]) -> NFA {
     let mut nfa_stack: Vec<NFA> = Vec::new();
-    let mut chars = postfix.chars();
 
-    while let Some(c) = chars.next() {
-        match c {
-            // This is our internal operator for separating segment inside
-            // postfix expression.
-            '#' => {
+    for token in postfix_tokens {
+        match token {
+            Token::Literal(c) => nfa_stack.push(nfa_from_literal(*c)),
+            Token::Class(class) => nfa_stack.push(nfa_from_class(class.clone())),
+            Token::Concat => {
                 let b = nfa_stack.pop().unwrap();
                 let a = nfa_stack.pop().unwrap();
                 nfa_stack.push(nfa_concat(a, b));
             }
-            '[' => {
-                let mut group_content = String::new();
-                while let Some(next_c) = chars.next() {
-                    if next_c == ']' {
-                        break;
-                    }
-                    group_content.push(next_c);
-                }
-
-                // if group_content.starts_with('^') {
-                //     let set = parse_char_group(&group_content[1..]);
-                //     nfa_stack.push(nfa_from_class(CharacterClass::Set(set)));
-                // } else {
-                //     let set = parse_char_group(&group_content);
-                //     nfa_stack.push(nfa_from_class(CharacterClass::Set(set)));
-                // }
-            }
-            '|' => {
+            Token::Alternation => {
                 let b = nfa_stack.pop().unwrap();
                 let a = nfa_stack.pop().unwrap();
                 nfa_stack.push(nfa_or(a, b));
             }
-            '*' => {
+            Token::ZeroOrMore => {
                 let a = nfa_stack.pop().unwrap();
                 nfa_stack.push(nfa_kleene_star(a));
             }
-            '+' => {
+            Token::OneOrMore => {
                 let a = nfa_stack.pop().unwrap();
                 nfa_stack.push(nfa_kleene_plus(a));
             }
-            '?' => {
+            Token::ZeroOrOne => {
                 let a = nfa_stack.pop().unwrap();
                 nfa_stack.push(nfa_optional(a));
             }
-            '.' => nfa_stack.push(nfa_from_class(CharacterClass::Any)),
-            '\\' => {
-                if let Some(escaped_char) = chars.next() {
-                    match escaped_char {
-                        'd' => nfa_stack.push(nfa_from_class(CharacterClass::Digit)),
-                        'w' => nfa_stack.push(nfa_from_class(CharacterClass::Word)),
-                        _ => nfa_stack.push(nfa_from_literal(escaped_char)),
-                    }
-                }
-            }
-            _ => {
-                nfa_stack.push(nfa_from_literal(c));
-            }
+            Token::CaptureStart(_) | Token::CaptureEnd(_) => {}
         }
     }
 
-    // The final NFA is the last one on the stack.
     nfa_stack.pop().unwrap_or_else(NFA::new)
 }
 
 // --- NFA Fragment Combination Functions ---
-// These functions implement Thompson's construction.
-// Each one takes one or two NFA fragments and combines them into a new, larger fragment.
 
-/// Creates a simple NFA fragment for a single literal character.
 fn nfa_from_literal(c: char) -> NFA {
     let mut states = vec![State::new(), State::new()];
     states[0].transitions.push((Transition::Literal(c), 1));
@@ -595,7 +428,6 @@ fn nfa_from_literal(c: char) -> NFA {
     }
 }
 
-/// Creates a simple NFA fragment for a character class.
 fn nfa_from_class(class: CharacterClass) -> NFA {
     let mut states = vec![State::new(), State::new()];
     states[0].transitions.push((Transition::Class(class), 1));
@@ -607,23 +439,19 @@ fn nfa_from_class(class: CharacterClass) -> NFA {
     }
 }
 
-/// Concatenates two NFA fragments (for `ab`).
 fn nfa_concat(mut a: NFA, mut b: NFA) -> NFA {
     let b_start_offset = a.states.len();
-    // Add epsilon transition from the end of `a` to the start of `b`.
     a.states[a.match_state]
         .transitions
         .push((Transition::Epsilon, b.start_state + b_start_offset));
-
-    // Before appending `b`'s states, their internal transition indices must be offset.
     for state in &mut b.states {
         for (_, to_idx) in &mut state.transitions {
             *to_idx += b_start_offset;
         }
     }
-
     a.states.append(&mut b.states);
     a.match_state = b.match_state + b_start_offset;
+    a.anchors.insert(b.anchors);
     a
 }
 
@@ -634,8 +462,7 @@ fn nfa_concat(mut a: NFA, mut b: NFA) -> NFA {
 /// => [ start -|-epsilon-> 0 -> 1 -> 2 -> 3 -> 4 -epsilon-|-> end]
 ///             |-epsilon-> 5 -> 6 -> 7           -epsilon-|
 fn nfa_or(mut a: NFA, mut b: NFA) -> NFA {
-    let mut states = vec![State::new()]; // New start state
-
+    let mut states = vec![State::new()];
     let a_start_offset = states.len();
     for state in &mut a.states {
         for (_, to_idx) in &mut state.transitions {
@@ -643,7 +470,6 @@ fn nfa_or(mut a: NFA, mut b: NFA) -> NFA {
         }
     }
     states.append(&mut a.states);
-
     let b_start_offset = states.len();
     for state in &mut b.states {
         for (_, to_idx) in &mut state.transitions {
@@ -651,31 +477,25 @@ fn nfa_or(mut a: NFA, mut b: NFA) -> NFA {
         }
     }
     states.append(&mut b.states);
-
     let match_state = states.len();
-    states.push(State::new()); // New match state
-
-    // Add epsilon transitions from the new start state to the start of `a` and `b`.
+    states.push(State::new());
     states[0]
         .transitions
         .push((Transition::Epsilon, a.start_state + a_start_offset));
     states[0]
         .transitions
         .push((Transition::Epsilon, b.start_state + b_start_offset));
-
-    // Add epsilon transitions from the ends of `a` and `b` to the new match state.
     states[a.match_state + a_start_offset]
         .transitions
         .push((Transition::Epsilon, match_state));
     states[b.match_state + b_start_offset]
         .transitions
         .push((Transition::Epsilon, match_state));
-
     NFA {
         states,
         start_state: 0,
         match_state,
-        anchors: Anchors::empty(),
+        anchors: a.anchors.union(b.anchors),
     }
 }
 
@@ -687,41 +507,33 @@ fn nfa_or(mut a: NFA, mut b: NFA) -> NFA {
 /// => [ start -|-epsilon-> 0 -> 1 -> 2 -epsilon-|-> end]
 ///        |----------------epsilon-------------------↑
 fn nfa_kleene_star(mut nfa: NFA) -> NFA {
-    let mut states = vec![State::new()]; // New start state
+    let mut states = vec![State::new()];
     let nfa_start_offset = states.len();
-
     for state in &mut nfa.states {
         for (_, to_idx) in &mut state.transitions {
             *to_idx += nfa_start_offset;
         }
     }
     states.append(&mut nfa.states);
-
     let match_state = states.len();
-    states.push(State::new()); // New match state
-
-    // Epsilon transition to either enter the fragment or skip it entirely.
+    states.push(State::new());
     states[0]
         .transitions
         .push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
     states[0]
         .transitions
         .push((Transition::Epsilon, match_state));
-
-    // Epsilon transitions from the end of the fragment back to the beginning (for repetition)
-    // or to the new match state.
     states[nfa.match_state + nfa_start_offset]
         .transitions
         .push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
     states[nfa.match_state + nfa_start_offset]
         .transitions
         .push((Transition::Epsilon, match_state));
-
     NFA {
         states,
         start_state: 0,
         match_state,
-        anchors: Anchors::empty(),
+        anchors: nfa.anchors,
     }
 }
 
@@ -733,37 +545,30 @@ fn nfa_kleene_star(mut nfa: NFA) -> NFA {
 /// => [ start -(at-least-1)-epsilon-> 0 -> 1 -> 2 -epsilon-|-> end]
 ///        |---------------------------epsilon-------------------↑
 fn nfa_kleene_plus(mut nfa: NFA) -> NFA {
-    let mut states = vec![State::new()]; // New start state
+    let mut states = vec![State::new()];
     let nfa_start_offset = states.len();
-
     for state in &mut nfa.states {
         for (_, to_idx) in &mut state.transitions {
             *to_idx += nfa_start_offset;
         }
     }
     states.append(&mut nfa.states);
-
     let match_state = states.len();
-    states.push(State::new()); // New match state
-
-    // Must enter the fragment at least once.
+    states.push(State::new());
     states[0]
         .transitions
         .push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
-
-    // Loop back for more repetitions or exit to the match state.
     states[nfa.match_state + nfa_start_offset]
         .transitions
         .push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
     states[nfa.match_state + nfa_start_offset]
         .transitions
         .push((Transition::Epsilon, match_state));
-
     NFA {
         states,
         start_state: 0,
         match_state,
-        anchors: Anchors::empty(),
+        anchors: nfa.anchors,
     }
 }
 
@@ -774,36 +579,29 @@ fn nfa_kleene_plus(mut nfa: NFA) -> NFA {
 /// => [ start -epsilon-> 0 -> 1 -> 2 -epsilon-|-> end]
 ///        |--------------epsilon-------------------↑
 fn nfa_optional(mut nfa: NFA) -> NFA {
-    let mut states = vec![State::new()]; // New start state
+    let mut states = vec![State::new()];
     let nfa_start_offset = states.len();
-
     for state in &mut nfa.states {
         for (_, to_idx) in &mut state.transitions {
             *to_idx += nfa_start_offset;
         }
     }
     states.append(&mut nfa.states);
-
     let match_state = states.len();
-    states.push(State::new()); // New match state
-
-    // Choice to enter the fragment or skip it.
+    states.push(State::new());
     states[0]
         .transitions
         .push((Transition::Epsilon, nfa.start_state + nfa_start_offset));
     states[0]
         .transitions
         .push((Transition::Epsilon, match_state));
-
-    // From the end of the fragment, go to the new match state.
     states[nfa.match_state + nfa_start_offset]
         .transitions
         .push((Transition::Epsilon, match_state));
-
     NFA {
         states,
         start_state: 0,
         match_state,
-        anchors: Anchors::empty(),
+        anchors: nfa.anchors,
     }
 }
