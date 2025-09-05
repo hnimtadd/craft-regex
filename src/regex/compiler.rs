@@ -1,5 +1,7 @@
 use bitflags::bitflags;
 
+static SEPARATOR: char = '#';
+
 // The main public function of the compiler module.
 // It orchestrates the two-step compilation process:
 // 1. Convert the human-readable infix regex pattern into a postfix notation (RPN).
@@ -20,6 +22,8 @@ pub fn compile(pattern: &str) -> NFA {
     }
 
     let postfix = to_postfix(pattern_slice);
+    println!("postfix {postfix}");
+
     let mut nfa = postfix_to_nfa(&postfix);
     nfa.anchors = anchors;
 
@@ -33,6 +37,7 @@ pub fn compile(pattern: &str) -> NFA {
 pub enum CharacterClass {
     Digit,                  // Represents `\d`
     Word,                   // Represents `\w`
+    Any,                    // Represents '.'
     PositiveSet(Vec<char>), // Represents `[abc]`
     NegativeSet(Vec<char>), // Represents `[^abc]`
 }
@@ -245,6 +250,7 @@ fn char_matches_class(c: char, class: &CharacterClass) -> bool {
         // Underscore _ is included as it is considered part of a word in
         // programming identifiers (e.g., variable and function names).
         CharacterClass::Word => c.is_ascii_alphanumeric() || c == '_',
+        CharacterClass::Any => c.is_ascii(),
         // Assumes the Vec is sorted. `binary_search` is efficient.
         CharacterClass::PositiveSet(set) => set.binary_search(&c).is_ok(),
         CharacterClass::NegativeSet(set) => set.binary_search(&c).is_err(),
@@ -257,7 +263,7 @@ fn char_matches_class(c: char, class: &CharacterClass) -> bool {
 fn precedence(op: char) -> u8 {
     match op {
         '|' => 1,             // Alternation
-        '.' => 2,             // Concatenation (explicitly inserted)
+        '#' => 2,             // Concatenation (explicitly inserted)
         '?' | '*' | '+' => 3, // Quantifiers
         _ => 0,               // Not an operator
     }
@@ -279,13 +285,13 @@ fn to_postfix(pattern: &str) -> String {
             if concat_next {
                 // If the previous token was a literal or a group, we need to insert a concat operator.
                 while let Some(&op) = operators.last() {
-                    if op != '(' && precedence(op) >= precedence('.') {
+                    if op != '(' && precedence(op) >= precedence(SEPARATOR) {
                         output.push(operators.pop().unwrap());
                     } else {
                         break;
                     }
                 }
-                operators.push('.');
+                operators.push(SEPARATOR);
             }
             if c == '\\' {
                 if let Some(escaped) = chars.next() {
@@ -298,16 +304,30 @@ fn to_postfix(pattern: &str) -> String {
             concat_next = true;
         } else {
             match c {
-                '[' => {
+                '.' => {
                     if concat_next {
                         while let Some(&op) = operators.last() {
-                            if op != '(' && precedence(op) >= precedence('.') {
+                            if op != '(' && precedence(op) >= precedence(SEPARATOR) {
                                 output.push(operators.pop().unwrap());
                             } else {
                                 break;
                             }
                         }
-                        operators.push('.');
+                        operators.push(SEPARATOR);
+                    }
+                    output.push(c);
+                    concat_next = true;
+                }
+                '[' => {
+                    if concat_next {
+                        while let Some(&op) = operators.last() {
+                            if op != '(' && precedence(op) >= precedence(SEPARATOR) {
+                                output.push(operators.pop().unwrap());
+                            } else {
+                                break;
+                            }
+                        }
+                        operators.push(SEPARATOR);
                     }
                     // Pass the entire character group through untouched.
                     output.push('[');
@@ -322,13 +342,13 @@ fn to_postfix(pattern: &str) -> String {
                 '(' => {
                     if concat_next {
                         while let Some(&op) = operators.last() {
-                            if op != '(' && precedence(op) >= precedence('.') {
+                            if op != '(' && precedence(op) >= precedence(SEPARATOR) {
                                 output.push(operators.pop().unwrap());
                             } else {
                                 break;
                             }
                         }
-                        operators.push('.');
+                        operators.push(SEPARATOR);
                     }
                     operators.push(c);
                     concat_next = false;
@@ -368,13 +388,13 @@ fn to_postfix(pattern: &str) -> String {
                     // Any other character is treated as a literal.
                     if concat_next {
                         while let Some(&op) = operators.last() {
-                            if op != '(' && precedence(op) >= precedence('.') {
+                            if op != '(' && precedence(op) >= precedence(SEPARATOR) {
                                 output.push(operators.pop().unwrap());
                             } else {
                                 break;
                             }
                         }
-                        operators.push('.');
+                        operators.push(SEPARATOR);
                     }
                     output.push(c);
                     concat_next = true;
@@ -428,6 +448,13 @@ fn postfix_to_nfa(postfix: &str) -> NFA {
 
     while let Some(c) = chars.next() {
         match c {
+            // This is our internal operator for separating segment inside
+            // postfix expression.
+            '#' => {
+                let b = nfa_stack.pop().unwrap();
+                let a = nfa_stack.pop().unwrap();
+                nfa_stack.push(nfa_concat(a, b));
+            }
             '[' => {
                 let mut group_content = String::new();
                 while let Some(next_c) = chars.next() {
@@ -450,11 +477,6 @@ fn postfix_to_nfa(postfix: &str) -> NFA {
                 let a = nfa_stack.pop().unwrap();
                 nfa_stack.push(nfa_or(a, b));
             }
-            '.' => {
-                let b = nfa_stack.pop().unwrap();
-                let a = nfa_stack.pop().unwrap();
-                nfa_stack.push(nfa_concat(a, b));
-            }
             '*' => {
                 let a = nfa_stack.pop().unwrap();
                 nfa_stack.push(nfa_kleene_star(a));
@@ -467,6 +489,7 @@ fn postfix_to_nfa(postfix: &str) -> NFA {
                 let a = nfa_stack.pop().unwrap();
                 nfa_stack.push(nfa_optional(a));
             }
+            '.' => nfa_stack.push(nfa_from_class(CharacterClass::Any)),
             '\\' => {
                 if let Some(escaped_char) = chars.next() {
                     match escaped_char {
