@@ -242,7 +242,9 @@ impl NFA {
 fn char_matches_class(c: char, class: &CharacterClass) -> bool {
     match class {
         CharacterClass::Digit => c.is_ascii_digit(),
-        CharacterClass::Word => c.is_ascii_alphanumeric() || c == ' ',
+        // Underscore _ is included as it is considered part of a word in
+        // programming identifiers (e.g., variable and function names).
+        CharacterClass::Word => c.is_ascii_alphanumeric() || c == '_',
         // Assumes the Vec is sorted. `binary_search` is efficient.
         CharacterClass::PositiveSet(set) => set.binary_search(&c).is_ok(),
         CharacterClass::NegativeSet(set) => set.binary_search(&c).is_err(),
