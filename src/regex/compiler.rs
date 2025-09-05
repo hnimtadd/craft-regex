@@ -265,6 +265,7 @@ fn precedence(op: char) -> u8 {
         '|' => 1,             // Alternation
         '#' => 2,             // Concatenation (explicitly inserted)
         '?' | '*' | '+' => 3, // Quantifiers
+        '.' => 4,             // Any
         _ => 0,               // Not an operator
     }
 }
@@ -315,7 +316,7 @@ fn to_postfix(pattern: &str) -> String {
                         }
                         operators.push(SEPARATOR);
                     }
-                    output.push(c);
+                    operators.push(c);
                     concat_next = true;
                 }
                 '[' => {
