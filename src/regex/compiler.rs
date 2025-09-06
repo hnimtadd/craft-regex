@@ -1,4 +1,7 @@
-use std::fmt::{self};
+use std::{
+    collections::{HashSet, VecDeque},
+    fmt::{self},
+};
 
 use bitflags::bitflags;
 
@@ -99,7 +102,13 @@ impl State {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct MatchThread {
+    state_idx: usize,
+    captures: Vec<CaptureGroup>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CaptureGroup {
     pub idx: usize,
     pub from: usize,
@@ -167,46 +176,65 @@ impl NFA {
     /// Simulates the NFA against an input string to check for a match.
     /// This search a match if the pattern appears anywhere in the string (like `grep`).
     fn run_search(&self, input: &str) -> MatchResult {
-        let mut capture_groups = Vec::new();
-        let mut current_states =
-            self.get_epsilon_closure(vec![self.start_state], &mut capture_groups, 0);
+        let mut threads = self.get_epsilon_closure(
+            vec![MatchThread {
+                state_idx: self.start_state,
+                captures: Vec::new(),
+            }],
+            0,
+        );
 
         for idx in 0..input.chars().count() {
+            println!("visiting {idx}");
             if !self.anchors.contains(Anchors::END_OF_STRING) {
-                if current_states.contains(&self.match_state) {
+                if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
                     return MatchResult {
                         is_match: true,
-                        capture_groups,
+                        capture_groups: th.captures.clone(),
                     };
                 }
             }
 
-            let next_raw_states = self.step_state(&current_states, input, idx);
-            current_states = self.get_epsilon_closure(next_raw_states, &mut capture_groups, idx);
-            current_states.extend(self.get_epsilon_closure(
-                vec![self.start_state],
-                &mut capture_groups,
+            let next_raw_threads = self.step_state(threads, input, idx);
+            println!("next_raw {:?}", next_raw_threads);
+            threads = self.get_epsilon_closure(next_raw_threads, idx);
+            threads.extend(self.get_epsilon_closure(
+                vec![MatchThread {
+                    state_idx: self.start_state,
+                    captures: Vec::new(),
+                }],
                 idx,
             ));
-            current_states.sort();
-            current_states.dedup();
+            threads.sort();
+            threads.dedup();
         }
 
-        MatchResult {
-            is_match: current_states.contains(&self.match_state),
-            capture_groups,
+        if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
+            return MatchResult {
+                is_match: true,
+                capture_groups: th.captures.clone(),
+            };
+        } else {
+            MatchResult {
+                is_match: false,
+                capture_groups: Vec::new(),
+            }
         }
     }
     /// Simulates the NFA against an input string to check for a match.
     /// This match the string in a stricter anchored awared way.
     fn run_match(&self, input: &str) -> MatchResult {
-        // `current_states` holds the set of all states the NFA is currently in.
-        let mut capture_groups = Vec::new();
-        let mut current_states =
-            self.get_epsilon_closure(vec![self.start_state], &mut capture_groups, 0);
+        // `threads` holds the set of all threads the NFA is currently in.
+        let mut threads = self.get_epsilon_closure(
+            vec![MatchThread {
+                state_idx: self.start_state,
+                captures: Vec::new(),
+            }],
+            0,
+        );
 
         for idx in 0..input.chars().count() {
-            if current_states.is_empty() {
+            if threads.is_empty() {
                 return MatchResult {
                     is_match: false,
                     capture_groups: Vec::new(),
@@ -217,23 +245,23 @@ impl NFA {
             // If there is no end anchor, we can return as soon as a match is found.
             if !self.anchors.contains(Anchors::END_OF_STRING) {
                 // If the set of current states includes the final match state, we have found a match.
-                if current_states.contains(&self.match_state) {
+                if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
                     return MatchResult {
                         is_match: true,
-                        capture_groups,
+                        capture_groups: th.captures.clone(),
                     };
                 }
             };
 
-            let next_raw_states = self.step_state(&current_states, input, idx);
-            current_states = self.get_epsilon_closure(next_raw_states, &mut capture_groups, idx);
+            let next_raw_threads = self.step_state(threads, input, idx);
+            threads = self.get_epsilon_closure(next_raw_threads, idx);
         }
 
-        if current_states.contains(&self.match_state) {
-            MatchResult {
+        if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
+            return MatchResult {
                 is_match: true,
-                capture_groups,
-            }
+                capture_groups: th.captures.clone(),
+            };
         } else {
             MatchResult {
                 is_match: false,
@@ -242,22 +270,51 @@ impl NFA {
         }
     }
 
-    fn step_state(&self, current_states: &[usize], input: &str, idx: usize) -> Vec<usize> {
-        let c = input.chars().nth(idx).unwrap();
-        let mut next_states = Vec::new();
-        for &state_idx in current_states {
-            for (transition, next_state_idx) in &self.states[state_idx].transitions {
+    fn step_state(&self, threads: Vec<MatchThread>, input: &str, idx: usize) -> Vec<MatchThread> {
+        let Some(c) = input.chars().nth(idx) else {
+            // If the index is out of bounds, there's no character to match.
+            // Return an empty vector of threads.
+            return Vec::new();
+        };
+        let mut next_threads = Vec::new();
+        for thread in threads.iter() {
+            print!("visit {:?}", thread);
+            for (transition, next_state_idx) in &self.states[thread.state_idx].transitions {
                 match transition {
                     Transition::Literal(tc) if *tc == c => {
                         println!("matching {} with literal {:?}", c, tc);
-                        next_states.push(*next_state_idx);
+                        let next_thread = MatchThread {
+                            state_idx: *next_state_idx,
+                            captures: thread.captures.clone(),
+                        };
+                        next_threads.push(next_thread);
                     }
                     Transition::Class(class) => {
                         println!("matching {} with class {:?}", c, class);
                         let is_match = match class {
                             CharacterClass::Digit => c.is_ascii_digit(),
                             CharacterClass::Word => c.is_ascii_alphanumeric() || c == '_',
-                            CharacterClass::BackReference(_) => true,
+                            CharacterClass::BackReference(ref_idx) => {
+                                match thread.captures.iter().nth(*ref_idx - 1) {
+                                    Some(cg) => {
+                                        println!("found group:{:?}", &input[cg.from..cg.to]);
+                                        match input.get(idx..idx + (cg.to - cg.from)) {
+                                            Some(slice) => {
+                                                println!("segment to compare: {}", slice);
+                                                slice == &input[cg.from..cg.to]
+                                            }
+                                            None => {
+                                                println!("could not get group matching");
+                                                false
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        println!("not found group:{}", *ref_idx);
+                                        false
+                                    }
+                                }
+                            }
                             CharacterClass::Any => true,
                             CharacterClass::Set { data, is_positive } => {
                                 let found = data.binary_search(&c).is_ok();
@@ -265,69 +322,89 @@ impl NFA {
                             }
                         };
                         if is_match {
-                            next_states.push(*next_state_idx);
+                            let next_thread = MatchThread {
+                                state_idx: *next_state_idx,
+                                captures: thread.captures.clone(),
+                            };
+                            next_threads.push(next_thread);
                         }
                     }
                     _ => {}
                 }
             }
         }
-        next_states
+        next_threads
     }
 
-    /// Computes the epsilon closure for a set of states.
-    /// An epsilon closure is the set of all states reachable from a given state
+    /// Computes the epsilon closure for a set of threads.
+    /// An epsilon closure is the set of all threads reachable from given threads
     /// using only epsilon transitions.
-    fn get_epsilon_closure(
-        &self,
-        states: Vec<usize>,
-        capture_groups: &mut Vec<CaptureGroup>,
-        idx: usize,
-    ) -> Vec<usize> {
-        let mut closure = states;
-        let mut i = 0;
-        while i < closure.len() {
-            let state_idx = closure[i];
-            for (transition, next_state_idx) in &self.states[state_idx].transitions {
+    fn get_epsilon_closure(&self, threads: Vec<MatchThread>, idx: usize) -> Vec<MatchThread> {
+        // Use the `VecDeque` as a queue for threads to visit.
+        let mut to_visit: VecDeque<MatchThread> = threads.into();
+
+        // Use a `HashSet` to keep track of visited states and avoid duplication.
+        let mut visited: HashSet<MatchThread> = HashSet::from_iter(to_visit.iter().cloned());
+
+        let mut closures = Vec::new();
+
+        while let Some(mut thread) = to_visit.pop_front() {
+            closures.push(thread.clone());
+
+            // Iterate over the transition of the current thread's state.
+            for (transition, next_state_idx) in &self.states[thread.state_idx].transitions {
                 match transition {
                     Transition::Epsilon => {
-                        if !closure.contains(next_state_idx) {
-                            println!("pushing {next_state_idx} to closure");
-                            closure.push(*next_state_idx);
+                        let next_thread = MatchThread {
+                            state_idx: *next_state_idx,
+                            captures: thread.captures.clone(),
+                        };
+                        if visited.insert(next_thread.clone()) {
+                            // if this one is not in visited before, add it to
+                            // the queue.
+                            to_visit.push_back(next_thread);
                         }
                     }
                     Transition::CaptureStart(capture_group_idx) => {
-                        println!("step in {capture_group_idx}");
-                        capture_groups.push(CaptureGroup {
+                        let mut next_thread = thread.clone();
+                        next_thread.captures.push(CaptureGroup {
                             idx: *capture_group_idx,
                             from: idx,
                             to: 0,
                         });
-                        if !closure.contains(next_state_idx) {
-                            println!("pushing {next_state_idx} to closure");
-                            closure.push(*next_state_idx);
+                        next_thread.state_idx = *next_state_idx;
+                        if visited.insert(next_thread.clone()) {
+                            // if this one is not in visited before, add it to
+                            // the queue.
+                            to_visit.push_back(next_thread);
                         }
                     }
                     Transition::CaptureEnd(capture_group_idx) => {
-                        if let Some(last_cg) = capture_groups.last_mut() {
-                            // end index should be plus 1 as string sliceing end
-                            // index is inclusive
+                        if let Some(last_cg) = thread.captures.last_mut() {
+                            // string slicing end idx is exclusive, so we have
+                            // to increase idx to 1, so the capture group
+                            // could capture the current index.
                             last_cg.to = idx + 1;
-                            println!("step out {capture_group_idx}");
                         } else {
-                            panic!("capture group {capture_group_idx} is empty");
+                            panic!("capture group {} is empty", capture_group_idx);
                         }
-                        if !closure.contains(next_state_idx) {
-                            println!("pushing {next_state_idx} to closure");
-                            closure.push(*next_state_idx);
+
+                        let next_thread = MatchThread {
+                            state_idx: *next_state_idx,
+                            captures: thread.captures.clone(),
+                        };
+
+                        if visited.insert(next_thread.clone()) {
+                            // if this one is not in visited before, add it to
+                            // the queue.
+                            to_visit.push_back(next_thread);
                         }
                     }
                     _ => {}
                 }
             }
-            i += 1;
         }
-        closure
+        closures
     }
 }
 
@@ -390,11 +467,30 @@ fn tokenize(pattern: &str) -> Vec<Token> {
                     match escaped {
                         'd' => tokens.push(Token::Class(CharacterClass::Digit)),
                         'w' => tokens.push(Token::Class(CharacterClass::Word)),
-                        _ => match escaped.to_digit(10) {
-                            Some(br) => tokens
-                                .push(Token::Class(CharacterClass::BackReference(br as usize))),
-                            None => panic!("not supported escaped"),
-                        },
+                        '1'..='9' => {
+                            let mut back_reference = String::from(escaped);
+
+                            loop {
+                                if let Some(&digit) = chars.peek() {
+                                    if digit.is_ascii_digit() {
+                                        back_reference.push(digit);
+                                        chars.next();
+                                        continue;
+                                    }
+                                }
+                                break;
+                            }
+
+                            match back_reference.parse() {
+                                Ok(br) => {
+                                    tokens.push(Token::Class(CharacterClass::BackReference(br)))
+                                }
+                                Err(err) => {
+                                    panic!("invalid back reference value: {back_reference}, err: {err}")
+                                }
+                            };
+                        }
+                        _ => {}
                     }
                 }
             }
