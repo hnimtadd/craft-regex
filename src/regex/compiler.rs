@@ -105,6 +105,7 @@ impl State {
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct MatchThread {
     state_idx: usize,
+    at_idx: usize, // the index in string that current thread is working on.
     captures: Vec<CaptureGroup>,
 }
 
@@ -176,16 +177,13 @@ impl NFA {
     /// Simulates the NFA against an input string to check for a match.
     /// This search a match if the pattern appears anywhere in the string (like `grep`).
     fn run_search(&self, input: &str) -> MatchResult {
-        let mut threads = self.get_epsilon_closure(
-            vec![MatchThread {
-                state_idx: self.start_state,
-                captures: Vec::new(),
-            }],
-            0,
-        );
+        let mut threads = self.get_epsilon_closure(vec![MatchThread {
+            state_idx: self.start_state,
+            at_idx: 0,
+            captures: Vec::new(),
+        }]);
 
         for idx in 0..input.chars().count() {
-            println!("visiting {idx}");
             if !self.anchors.contains(Anchors::END_OF_STRING) {
                 if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
                     return MatchResult {
@@ -195,16 +193,13 @@ impl NFA {
                 }
             }
 
-            let next_raw_threads = self.step_state(threads, input, idx);
-            println!("next_raw {:?}", next_raw_threads);
-            threads = self.get_epsilon_closure(next_raw_threads, idx);
-            threads.extend(self.get_epsilon_closure(
-                vec![MatchThread {
-                    state_idx: self.start_state,
-                    captures: Vec::new(),
-                }],
-                idx,
-            ));
+            let next_raw_threads = self.consume(threads, input);
+            threads = self.get_epsilon_closure(next_raw_threads);
+            threads.extend(self.get_epsilon_closure(vec![MatchThread {
+                at_idx: idx,
+                state_idx: self.start_state,
+                captures: Vec::new(),
+            }]));
             threads.sort();
             threads.dedup();
         }
@@ -225,15 +220,13 @@ impl NFA {
     /// This match the string in a stricter anchored awared way.
     fn run_match(&self, input: &str) -> MatchResult {
         // `threads` holds the set of all threads the NFA is currently in.
-        let mut threads = self.get_epsilon_closure(
-            vec![MatchThread {
-                state_idx: self.start_state,
-                captures: Vec::new(),
-            }],
-            0,
-        );
+        let mut threads = self.get_epsilon_closure(vec![MatchThread {
+            state_idx: self.start_state,
+            at_idx: 0,
+            captures: Vec::new(),
+        }]);
 
-        for idx in 0..input.chars().count() {
+        for _ in 0..input.chars().count() {
             if threads.is_empty() {
                 return MatchResult {
                     is_match: false,
@@ -253,8 +246,8 @@ impl NFA {
                 }
             };
 
-            let next_raw_threads = self.step_state(threads, input, idx);
-            threads = self.get_epsilon_closure(next_raw_threads, idx);
+            let next_raw_threads = self.consume(threads, input);
+            threads = self.get_epsilon_closure(next_raw_threads);
         }
 
         if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
@@ -270,49 +263,56 @@ impl NFA {
         }
     }
 
-    fn step_state(&self, threads: Vec<MatchThread>, input: &str, idx: usize) -> Vec<MatchThread> {
-        let Some(c) = input.chars().nth(idx) else {
-            // If the index is out of bounds, there's no character to match.
-            // Return an empty vector of threads.
-            return Vec::new();
-        };
+    // consume consume input at the idx with given threads state.
+    fn consume(&self, threads: Vec<MatchThread>, input: &str) -> Vec<MatchThread> {
         let mut next_threads = Vec::new();
         for thread in threads.iter() {
-            print!("visit {:?}", thread);
+            let Some(c) = input.chars().nth(thread.at_idx) else {
+                // If the index is out of bounds, there's no character to match.
+                // Return an empty vector of threads.
+                continue;
+            };
             for (transition, next_state_idx) in &self.states[thread.state_idx].transitions {
                 match transition {
                     Transition::Literal(tc) if *tc == c => {
-                        println!("matching {} with literal {:?}", c, tc);
                         let next_thread = MatchThread {
                             state_idx: *next_state_idx,
+                            at_idx: thread.at_idx + 1,
                             captures: thread.captures.clone(),
                         };
                         next_threads.push(next_thread);
                     }
                     Transition::Class(class) => {
-                        println!("matching {} with class {:?}", c, class);
+                        let mut consumed = 0;
                         let is_match = match class {
-                            CharacterClass::Digit => c.is_ascii_digit(),
-                            CharacterClass::Word => c.is_ascii_alphanumeric() || c == '_',
+                            CharacterClass::Digit => {
+                                consumed = 1;
+                                c.is_ascii_digit()
+                            }
+                            CharacterClass::Word => {
+                                consumed = 1;
+                                c.is_ascii_alphanumeric() || c == '_'
+                            }
                             CharacterClass::BackReference(ref_idx) => {
                                 match thread.captures.iter().nth(*ref_idx - 1) {
-                                    Some(cg) => {
-                                        println!("found group:{:?}", &input[cg.from..cg.to]);
-                                        match input.get(idx..idx + (cg.to - cg.from)) {
-                                            Some(slice) => {
-                                                println!("segment to compare: {}", slice);
-                                                slice == &input[cg.from..cg.to]
-                                            }
-                                            None => {
-                                                println!("could not get group matching");
-                                                false
-                                            }
+                                    Some(cg) => match input
+                                        .get(thread.at_idx..thread.at_idx + (cg.to - cg.from))
+                                    {
+                                        Some(slice) => {
+                                            let br_match = slice == &input[cg.from..cg.to];
+                                            println!(
+                                                "segment to compare: {}, matched = {}, thread: {:?}",
+                                                slice, br_match, thread,
+                                            );
+                                            consumed = cg.to - cg.from;
+                                            br_match
                                         }
-                                    }
-                                    None => {
-                                        println!("not found group:{}", *ref_idx);
-                                        false
-                                    }
+                                        None => {
+                                            println!("could not get group matching");
+                                            false
+                                        }
+                                    },
+                                    None => false,
                                 }
                             }
                             CharacterClass::Any => true,
@@ -324,6 +324,7 @@ impl NFA {
                         if is_match {
                             let next_thread = MatchThread {
                                 state_idx: *next_state_idx,
+                                at_idx: thread.at_idx + consumed,
                                 captures: thread.captures.clone(),
                             };
                             next_threads.push(next_thread);
@@ -339,7 +340,7 @@ impl NFA {
     /// Computes the epsilon closure for a set of threads.
     /// An epsilon closure is the set of all threads reachable from given threads
     /// using only epsilon transitions.
-    fn get_epsilon_closure(&self, threads: Vec<MatchThread>, idx: usize) -> Vec<MatchThread> {
+    fn get_epsilon_closure(&self, threads: Vec<MatchThread>) -> Vec<MatchThread> {
         // Use the `VecDeque` as a queue for threads to visit.
         let mut to_visit: VecDeque<MatchThread> = threads.into();
 
@@ -356,6 +357,7 @@ impl NFA {
                 match transition {
                     Transition::Epsilon => {
                         let next_thread = MatchThread {
+                            at_idx: thread.at_idx,
                             state_idx: *next_state_idx,
                             captures: thread.captures.clone(),
                         };
@@ -369,7 +371,7 @@ impl NFA {
                         let mut next_thread = thread.clone();
                         next_thread.captures.push(CaptureGroup {
                             idx: *capture_group_idx,
-                            from: idx,
+                            from: thread.at_idx,
                             to: 0,
                         });
                         next_thread.state_idx = *next_state_idx;
@@ -384,13 +386,14 @@ impl NFA {
                             // string slicing end idx is exclusive, so we have
                             // to increase idx to 1, so the capture group
                             // could capture the current index.
-                            last_cg.to = idx + 1;
+                            last_cg.to = thread.at_idx;
                         } else {
                             panic!("capture group {} is empty", capture_group_idx);
                         }
 
                         let next_thread = MatchThread {
                             state_idx: *next_state_idx,
+                            at_idx: thread.at_idx,
                             captures: thread.captures.clone(),
                         };
 
