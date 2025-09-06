@@ -1,3 +1,5 @@
+use std::fmt::{self};
+
 use bitflags::bitflags;
 
 // The main public function of the compiler module.
@@ -18,20 +20,17 @@ pub fn compile(pattern: &str) -> NFA {
 
     // Pass 1: Tokenize the pattern string into a sequence of Tokens.
     let tokens = tokenize(pattern_slice);
-    println!("tokens: {:?}", tokens);
     // Pass 2: Insert explicit concatenation tokens where necessary.
     let tokens_with_concat = insert_concatenation(tokens);
-    println!("tokens_with_concat: {:?}", tokens_with_concat);
     // Pass 3: Reorder the tokens into postfix (RPN) order using Shunting-yard.
     let postfix_tokens = shunting_yard(tokens_with_concat);
-    println!("postfix: {:?}", postfix_tokens);
 
     // Compile the final token stream into an NFA.
     let mut nfa = postfix_to_nfa(&postfix_tokens);
     // Attach the detected anchors to the final NFA.
     nfa.anchors = anchors;
 
-    println!("nfa: {:?}", nfa);
+    println!("nfa: {:#?}", nfa);
     nfa
 }
 
@@ -41,8 +40,9 @@ pub fn compile(pattern: &str) -> NFA {
 pub enum CharacterClass {
     Digit,                                      // Represents `\d`
     Word,                                       // Represents `\w`
-    Any,                                        // Represents '.'
+    Any,                                        // Represents `.`
     Set { data: Vec<char>, is_positive: bool }, // Represents `[^abc]` or `[abc]`
+    BackReference(usize),                       // Represents `\1`, `\2`
 }
 
 #[derive(Debug, Clone)]
@@ -99,12 +99,14 @@ impl State {
     }
 }
 
+#[derive(Debug)]
 pub struct CaptureGroup {
-    idx: usize,
-    from: usize,
-    to: usize,
+    pub idx: usize,
+    pub from: usize,
+    pub to: usize,
 }
 
+#[derive(Debug)]
 pub struct MatchResult {
     pub is_match: bool,
     pub capture_groups: Vec<CaptureGroup>,
@@ -112,7 +114,6 @@ pub struct MatchResult {
 
 /// Represents a compiled NFA. It can also be a "fragment" of a larger NFA
 /// during the compilation process. Each fragment has a single start state and a single match state.
-#[derive(Debug)]
 pub struct NFA {
     // All the states in the NFA.
     pub states: Vec<State>,
@@ -124,6 +125,23 @@ pub struct NFA {
     // the matching process will stricter, as it only lookup from specific
     // part of the matching string.
     pub anchors: Anchors,
+}
+
+impl fmt::Debug for NFA {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(
+            f,
+            "start_state: {}, match_state: {}",
+            self.start_state, self.match_state
+        )
+        .unwrap();
+        writeln!(f, "states:").unwrap();
+        for (idx, state) in self.states.iter().enumerate() {
+            writeln!(f, "\t{:3}: {:?}", idx, state).unwrap();
+        }
+        writeln!(f, "anchors: {:?}", self.anchors).unwrap();
+        Ok(())
+    }
 }
 
 // --- NFA Simulation ---
@@ -149,10 +167,11 @@ impl NFA {
     /// Simulates the NFA against an input string to check for a match.
     /// This search a match if the pattern appears anywhere in the string (like `grep`).
     fn run_search(&self, input: &str) -> MatchResult {
-        let mut current_states = self.get_epsilon_closure(vec![self.start_state]);
-        let capture_groups = Vec::new();
+        let mut capture_groups = Vec::new();
+        let mut current_states =
+            self.get_epsilon_closure(vec![self.start_state], &mut capture_groups, 0);
 
-        for c in input.chars() {
+        for idx in 0..input.chars().count() {
             if !self.anchors.contains(Anchors::END_OF_STRING) {
                 if current_states.contains(&self.match_state) {
                     return MatchResult {
@@ -162,9 +181,13 @@ impl NFA {
                 }
             }
 
-            let next_raw_states = self.step_state(&current_states, &capture_groups, c);
-            current_states = self.get_epsilon_closure(next_raw_states);
-            current_states.extend(self.get_epsilon_closure(vec![self.start_state]));
+            let next_raw_states = self.step_state(&current_states, input, idx);
+            current_states = self.get_epsilon_closure(next_raw_states, &mut capture_groups, idx);
+            current_states.extend(self.get_epsilon_closure(
+                vec![self.start_state],
+                &mut capture_groups,
+                idx,
+            ));
             current_states.sort();
             current_states.dedup();
         }
@@ -178,10 +201,11 @@ impl NFA {
     /// This match the string in a stricter anchored awared way.
     fn run_match(&self, input: &str) -> MatchResult {
         // `current_states` holds the set of all states the NFA is currently in.
-        let mut current_states = self.get_epsilon_closure(vec![self.start_state]);
         let mut capture_groups = Vec::new();
+        let mut current_states =
+            self.get_epsilon_closure(vec![self.start_state], &mut capture_groups, 0);
 
-        for c in input.chars() {
+        for idx in 0..input.chars().count() {
             if current_states.is_empty() {
                 return MatchResult {
                     is_match: false,
@@ -201,9 +225,10 @@ impl NFA {
                 }
             };
 
-            let next_raw_states = self.step_state(&current_states, capture_groups, c);
-            current_states = self.get_epsilon_closure(next_raw_states);
+            let next_raw_states = self.step_state(&current_states, input, idx);
+            current_states = self.get_epsilon_closure(next_raw_states, &mut capture_groups, idx);
         }
+
         if current_states.contains(&self.match_state) {
             MatchResult {
                 is_match: true,
@@ -217,35 +242,31 @@ impl NFA {
         }
     }
 
-    fn step_state(
-        &self,
-        current_states: &[usize],
-        mut capture_groups: Vec<CaptureGroup>,
-        c: char,
-    ) -> Vec<usize> {
+    fn step_state(&self, current_states: &[usize], input: &str, idx: usize) -> Vec<usize> {
+        let c = input.chars().nth(idx).unwrap();
         let mut next_states = Vec::new();
         for &state_idx in current_states {
             for (transition, next_state_idx) in &self.states[state_idx].transitions {
                 match transition {
                     Transition::Literal(tc) if *tc == c => {
+                        println!("matching {} with literal {:?}", c, tc);
                         next_states.push(*next_state_idx);
                     }
                     Transition::Class(class) => {
-                        if char_matches_class(c, class) {
+                        println!("matching {} with class {:?}", c, class);
+                        let is_match = match class {
+                            CharacterClass::Digit => c.is_ascii_digit(),
+                            CharacterClass::Word => c.is_ascii_alphanumeric() || c == '_',
+                            CharacterClass::BackReference(_) => true,
+                            CharacterClass::Any => true,
+                            CharacterClass::Set { data, is_positive } => {
+                                let found = data.binary_search(&c).is_ok();
+                                *is_positive == found
+                            }
+                        };
+                        if is_match {
                             next_states.push(*next_state_idx);
                         }
-                    }
-                    Transition::CaptureStart(idx) => {
-                        capture_groups.push(CaptureGroup {
-                            idx: *idx,
-                            from: 0,
-                            to: 0,
-                        });
-
-                        println!("step into {idx}");
-                    }
-                    Transition::CaptureEnd(idx) => {
-                        println!("step out {idx}");
                     }
                     _ => {}
                 }
@@ -257,17 +278,47 @@ impl NFA {
     /// Computes the epsilon closure for a set of states.
     /// An epsilon closure is the set of all states reachable from a given state
     /// using only epsilon transitions.
-    fn get_epsilon_closure(&self, states: Vec<usize>) -> Vec<usize> {
+    fn get_epsilon_closure(
+        &self,
+        states: Vec<usize>,
+        capture_groups: &mut Vec<CaptureGroup>,
+        idx: usize,
+    ) -> Vec<usize> {
         let mut closure = states;
         let mut i = 0;
         while i < closure.len() {
             let state_idx = closure[i];
             for (transition, next_state_idx) in &self.states[state_idx].transitions {
                 match transition {
-                    Transition::Epsilon
-                    | Transition::CaptureStart(_)
-                    | Transition::CaptureEnd(_) => {
+                    Transition::Epsilon => {
                         if !closure.contains(next_state_idx) {
+                            println!("pushing {next_state_idx} to closure");
+                            closure.push(*next_state_idx);
+                        }
+                    }
+                    Transition::CaptureStart(capture_group_idx) => {
+                        println!("step in {capture_group_idx}");
+                        capture_groups.push(CaptureGroup {
+                            idx: *capture_group_idx,
+                            from: idx,
+                            to: 0,
+                        });
+                        if !closure.contains(next_state_idx) {
+                            println!("pushing {next_state_idx} to closure");
+                            closure.push(*next_state_idx);
+                        }
+                    }
+                    Transition::CaptureEnd(capture_group_idx) => {
+                        if let Some(last_cg) = capture_groups.last_mut() {
+                            // end index should be plus 1 as string sliceing end
+                            // index is inclusive
+                            last_cg.to = idx + 1;
+                            println!("step out {capture_group_idx}");
+                        } else {
+                            panic!("capture group {capture_group_idx} is empty");
+                        }
+                        if !closure.contains(next_state_idx) {
+                            println!("pushing {next_state_idx} to closure");
                             closure.push(*next_state_idx);
                         }
                     }
@@ -277,19 +328,6 @@ impl NFA {
             i += 1;
         }
         closure
-    }
-}
-
-/// Helper function for the simulator to check if a character matches a CharacterClass.
-fn char_matches_class(c: char, class: &CharacterClass) -> bool {
-    match class {
-        CharacterClass::Digit => c.is_ascii_digit(),
-        CharacterClass::Word => c.is_ascii_alphanumeric() || c == '_',
-        CharacterClass::Any => true,
-        CharacterClass::Set { data, is_positive } => {
-            let found = data.binary_search(&c).is_ok();
-            *is_positive == found
-        }
     }
 }
 
@@ -320,12 +358,12 @@ fn tokenize(pattern: &str) -> Vec<Token> {
             '?' => tokens.push(Token::ZeroOrOne),
             '.' => tokens.push(Token::Class(CharacterClass::Any)),
             '(' => {
-                tokens.push(Token::CaptureStart(capture_group_count));
                 capture_group_count += 1;
+                tokens.push(Token::CaptureStart(capture_group_count));
             }
             ')' => {
+                tokens.push(Token::CaptureEnd(capture_group_count));
                 capture_group_count -= 1;
-                tokens.push(Token::CaptureEnd(capture_group_count))
             }
             '[' => {
                 let mut set = Vec::new();
@@ -352,7 +390,11 @@ fn tokenize(pattern: &str) -> Vec<Token> {
                     match escaped {
                         'd' => tokens.push(Token::Class(CharacterClass::Digit)),
                         'w' => tokens.push(Token::Class(CharacterClass::Word)),
-                        _ => tokens.push(Token::Literal(escaped)),
+                        _ => match escaped.to_digit(10) {
+                            Some(br) => tokens
+                                .push(Token::Class(CharacterClass::BackReference(br as usize))),
+                            None => panic!("not supported escaped"),
+                        },
                     }
                 }
             }

@@ -18,8 +18,17 @@ fn main() {
 
     let nfa = regex::compiler::compile(&pattern);
 
-    let result = nfa.is_match(&input_line.trim_end());
+    let result = nfa.is_match(&input_line);
     if result.is_match {
+        for cg in result.capture_groups {
+            println!(
+                "group: {}, from: {}, to: {}, match: {}",
+                cg.idx,
+                cg.from,
+                cg.to,
+                &input_line[cg.from..cg.to],
+            );
+        }
         process::exit(0);
     } else {
         process::exit(1);
