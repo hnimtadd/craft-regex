@@ -18,16 +18,20 @@ pub fn compile(pattern: &str) -> NFA {
 
     // Pass 1: Tokenize the pattern string into a sequence of Tokens.
     let tokens = tokenize(pattern_slice);
+    println!("tokens: {:?}", tokens);
     // Pass 2: Insert explicit concatenation tokens where necessary.
     let tokens_with_concat = insert_concatenation(tokens);
+    println!("tokens_with_concat: {:?}", tokens_with_concat);
     // Pass 3: Reorder the tokens into postfix (RPN) order using Shunting-yard.
     let postfix_tokens = shunting_yard(tokens_with_concat);
+    println!("postfix: {:?}", postfix_tokens);
 
     // Compile the final token stream into an NFA.
     let mut nfa = postfix_to_nfa(&postfix_tokens);
     // Attach the detected anchors to the final NFA.
     nfa.anchors = anchors;
 
+    println!("nfa: {:?}", nfa);
     nfa
 }
 
@@ -50,6 +54,9 @@ pub enum Transition {
     Literal(char),
     // A transition on a class of characters (e.g., any digit).
     Class(CharacterClass),
+    // A transition for the capture group.
+    CaptureStart(usize),
+    CaptureEnd(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +70,7 @@ pub enum Token {
     ZeroOrOne,             // The ? operator
     CaptureStart(usize),   // A ( mark the start of the capture group
     CaptureEnd(usize),     // A ) mark the end of the capture group
+    CaptureGroup(usize),   // A () mark the end of the capture group
 }
 
 bitflags! {
@@ -89,6 +97,17 @@ impl State {
             transitions: Vec::new(),
         }
     }
+}
+
+pub struct CaptureGroup {
+    idx: usize,
+    from: usize,
+    to: usize,
+}
+
+pub struct MatchResult {
+    pub is_match: bool,
+    pub capture_groups: Vec<CaptureGroup>,
 }
 
 /// Represents a compiled NFA. It can also be a "fragment" of a larger NFA
@@ -119,7 +138,7 @@ impl NFA {
         }
     }
     /// Simulates the NFA against an input string to check for a match.
-    pub fn is_match(&self, input: &str) -> bool {
+    pub fn is_match(&self, input: &str) -> MatchResult {
         if self.anchors.contains(Anchors::START_OF_STRING) {
             self.run_match(input)
         } else {
@@ -129,46 +148,45 @@ impl NFA {
 
     /// Simulates the NFA against an input string to check for a match.
     /// This search a match if the pattern appears anywhere in the string (like `grep`).
-    fn run_search(&self, input: &str) -> bool {
+    fn run_search(&self, input: &str) -> MatchResult {
         let mut current_states = self.get_epsilon_closure(vec![self.start_state]);
-
-        if !self.anchors.contains(Anchors::END_OF_STRING) {
-            if current_states.contains(&self.match_state) {
-                return true;
-            }
-        }
+        let capture_groups = Vec::new();
 
         for c in input.chars() {
-            let next_raw_states = self.step_state(&current_states, c);
+            if !self.anchors.contains(Anchors::END_OF_STRING) {
+                if current_states.contains(&self.match_state) {
+                    return MatchResult {
+                        is_match: true,
+                        capture_groups,
+                    };
+                }
+            }
+
+            let next_raw_states = self.step_state(&current_states, &capture_groups, c);
             current_states = self.get_epsilon_closure(next_raw_states);
             current_states.extend(self.get_epsilon_closure(vec![self.start_state]));
             current_states.sort();
             current_states.dedup();
-
-            if !self.anchors.contains(Anchors::END_OF_STRING) {
-                if current_states.contains(&self.match_state) {
-                    return true;
-                }
-            }
         }
-        current_states.contains(&self.match_state)
+
+        MatchResult {
+            is_match: current_states.contains(&self.match_state),
+            capture_groups,
+        }
     }
     /// Simulates the NFA against an input string to check for a match.
     /// This match the string in a stricter anchored awared way.
-    fn run_match(&self, input: &str) -> bool {
+    fn run_match(&self, input: &str) -> MatchResult {
         // `current_states` holds the set of all states the NFA is currently in.
         let mut current_states = self.get_epsilon_closure(vec![self.start_state]);
-
-        if input.is_empty() {
-            return current_states.contains(&self.match_state);
-        }
+        let mut capture_groups = Vec::new();
 
         for c in input.chars() {
-            let next_raw_states = self.step_state(&current_states, c);
-            current_states = self.get_epsilon_closure(next_raw_states);
-
             if current_states.is_empty() {
-                return false;
+                return MatchResult {
+                    is_match: false,
+                    capture_groups: Vec::new(),
+                };
             }
 
             // If an end anchor exists, we CANNOT return early. We must consume the whole string.
@@ -176,14 +194,35 @@ impl NFA {
             if !self.anchors.contains(Anchors::END_OF_STRING) {
                 // If the set of current states includes the final match state, we have found a match.
                 if current_states.contains(&self.match_state) {
-                    return true;
+                    return MatchResult {
+                        is_match: true,
+                        capture_groups,
+                    };
                 }
+            };
+
+            let next_raw_states = self.step_state(&current_states, capture_groups, c);
+            current_states = self.get_epsilon_closure(next_raw_states);
+        }
+        if current_states.contains(&self.match_state) {
+            MatchResult {
+                is_match: true,
+                capture_groups,
+            }
+        } else {
+            MatchResult {
+                is_match: false,
+                capture_groups: Vec::new(),
             }
         }
-        current_states.contains(&self.match_state)
     }
 
-    fn step_state(&self, current_states: &[usize], c: char) -> Vec<usize> {
+    fn step_state(
+        &self,
+        current_states: &[usize],
+        mut capture_groups: Vec<CaptureGroup>,
+        c: char,
+    ) -> Vec<usize> {
         let mut next_states = Vec::new();
         for &state_idx in current_states {
             for (transition, next_state_idx) in &self.states[state_idx].transitions {
@@ -195,6 +234,18 @@ impl NFA {
                         if char_matches_class(c, class) {
                             next_states.push(*next_state_idx);
                         }
+                    }
+                    Transition::CaptureStart(idx) => {
+                        capture_groups.push(CaptureGroup {
+                            idx: *idx,
+                            from: 0,
+                            to: 0,
+                        });
+
+                        println!("step into {idx}");
+                    }
+                    Transition::CaptureEnd(idx) => {
+                        println!("step out {idx}");
                     }
                     _ => {}
                 }
@@ -212,10 +263,15 @@ impl NFA {
         while i < closure.len() {
             let state_idx = closure[i];
             for (transition, next_state_idx) in &self.states[state_idx].transitions {
-                if let Transition::Epsilon = transition {
-                    if !closure.contains(next_state_idx) {
-                        closure.push(*next_state_idx);
+                match transition {
+                    Transition::Epsilon
+                    | Transition::CaptureStart(_)
+                    | Transition::CaptureEnd(_) => {
+                        if !closure.contains(next_state_idx) {
+                            closure.push(*next_state_idx);
+                        }
                     }
+                    _ => {}
                 }
             }
             i += 1;
@@ -240,12 +296,13 @@ fn char_matches_class(c: char, class: &CharacterClass) -> bool {
 // --- Infix to Postfix Conversion (Shunting-yard Algorithm) ---
 
 /// Returns the precedence of a regex operator. Higher numbers mean higher precedence.
-fn precedence(token: &Token) -> u8 {
+fn precedence(token: &Token) -> f32 {
     match token {
-        Token::Alternation => 1,
-        Token::Concat => 2,
-        Token::ZeroOrOne | Token::ZeroOrMore | Token::OneOrMore => 3,
-        _ => 0,
+        Token::CaptureStart(idx) => 0.0 + 1.0 / (*idx as f32 + 2.0),
+        Token::Alternation => 1.0,
+        Token::Concat => 2.0,
+        Token::ZeroOrOne | Token::ZeroOrMore | Token::OneOrMore => 3.0,
+        _ => 0.0,
     }
 }
 
@@ -263,16 +320,19 @@ fn tokenize(pattern: &str) -> Vec<Token> {
             '?' => tokens.push(Token::ZeroOrOne),
             '.' => tokens.push(Token::Class(CharacterClass::Any)),
             '(' => {
-                capture_group_count += 1;
                 tokens.push(Token::CaptureStart(capture_group_count));
+                capture_group_count += 1;
             }
-            ')' => tokens.push(Token::CaptureEnd(0)), // Index is adjusted later
+            ')' => {
+                capture_group_count -= 1;
+                tokens.push(Token::CaptureEnd(capture_group_count))
+            }
             '[' => {
                 let mut set = Vec::new();
                 let positive = chars.peek() != Some(&'^');
                 if !positive {
-                    chars.next();
-                } // Consume '^'
+                    chars.next(); // Consume '^'
+                }
 
                 while let Some(sc) = chars.next() {
                     if sc == ']' {
@@ -334,45 +394,75 @@ fn insert_concatenation(tokens: Vec<Token>) -> Vec<Token> {
 /// Pass 3: Reorder tokens from infix to postfix using Shunting-yard.
 fn shunting_yard(tokens: Vec<Token>) -> Vec<Token> {
     let mut output = Vec::new();
+    let mut buffers = Vec::new();
     let mut operators = Vec::new();
 
     for token in tokens {
         match token {
-            Token::Literal(_) | Token::Class(_) => output.push(token),
+            Token::Literal(_) | Token::Class(_) => {
+                let buffer = if let Some(buffer) = buffers.last_mut() {
+                    buffer
+                } else {
+                    buffers.push(Vec::new());
+                    buffers.last_mut().unwrap()
+                };
+                buffer.push(token)
+            }
             Token::Concat
             | Token::Alternation
             | Token::ZeroOrMore
             | Token::OneOrMore
             | Token::ZeroOrOne => {
-                while let Some(top_op) = operators.last() {
-                    if matches!(top_op, Token::CaptureStart(_)) {
-                        break;
+                let buffer = if let Some(buffer) = buffers.last_mut() {
+                    buffer
+                } else {
+                    buffers.push(Vec::new());
+                    buffers.last_mut().unwrap()
+                };
+                while let Some(op) = operators.last() {
+                    if precedence(op) >= precedence(&token) {
+                        buffer.push(operators.pop().unwrap());
+                        continue;
                     }
-                    if precedence(top_op) >= precedence(&token) {
-                        output.push(operators.pop().unwrap());
-                    } else {
-                        break;
-                    }
+                    break;
                 }
                 operators.push(token);
             }
-            Token::CaptureStart(_) => operators.push(token),
-            Token::CaptureEnd(_) => {
-                while let Some(top_op) = operators.last() {
-                    if matches!(top_op, Token::CaptureStart(_)) {
+            Token::CaptureStart(_) => {
+                let buffer = Vec::<Token>::new();
+                buffers.push(buffer);
+
+                operators.push(token);
+            }
+            Token::CaptureEnd(idx) => {
+                let mut buffer = buffers.pop().unwrap();
+                while let Some(op) = operators.last() {
+                    if matches!(op, Token::CaptureStart(_)) {
                         break;
                     }
-                    output.push(operators.pop().unwrap());
+                    buffer.push(operators.pop().unwrap());
                 }
-                if !operators.is_empty() {
-                    operators.pop();
-                }
+                // it is gurantee to have capture start at this point.
+                assert!(matches!(operators.pop().unwrap(), Token::CaptureStart(_)));
+                output.extend(buffer);
+                output.push(Token::CaptureGroup(idx));
+            }
+            Token::CaptureGroup(_) => {
+                panic!("this should not happend");
             }
         }
     }
 
+    if buffers.is_empty() {
+        buffers.push(Vec::new());
+    }
+    let last_buffer = buffers.last_mut().unwrap();
+
     while let Some(op) = operators.pop() {
-        output.push(op);
+        last_buffer.push(op);
+    }
+    for buffer in buffers.iter().rev() {
+        output.extend_from_slice(buffer);
     }
 
     output
@@ -408,7 +498,13 @@ fn postfix_to_nfa(postfix_tokens: &[Token]) -> NFA {
                 let a = nfa_stack.pop().unwrap();
                 nfa_stack.push(nfa_optional(a));
             }
-            Token::CaptureStart(_) | Token::CaptureEnd(_) => {}
+            Token::CaptureStart(_) | Token::CaptureEnd(_) => {
+                panic!("This should not happend");
+            }
+            Token::CaptureGroup(idx) => {
+                let a = nfa_stack.pop().unwrap();
+                nfa_stack.push(nfa_capture_group(*idx, a))
+            }
         }
     }
 
@@ -598,6 +694,41 @@ fn nfa_optional(mut nfa: NFA) -> NFA {
     states[nfa.match_state + nfa_start_offset]
         .transitions
         .push((Transition::Epsilon, match_state));
+    NFA {
+        states,
+        start_state: 0,
+        match_state,
+        anchors: nfa.anchors,
+    }
+}
+
+/// Creates an NFA for capture start.
+/// This will:
+/// nfa: [ 0 -> 1 -> 2 ]
+///
+/// => [ start -capture_start-> 0 -> 1 -> 2 -capture_end-> end]
+fn nfa_capture_group(idx: usize, mut nfa: NFA) -> NFA {
+    let mut states = vec![State::new()];
+    let nfa_start_offset = states.len();
+    for state in &mut nfa.states {
+        for (_, to_idx) in &mut state.transitions {
+            *to_idx += nfa_start_offset;
+        }
+    }
+    states.append(&mut nfa.states);
+
+    states.push(State::new());
+    let match_state = states.len() - 1;
+
+    states[0].transitions.push((
+        Transition::CaptureStart(idx),
+        nfa.start_state + nfa_start_offset,
+    ));
+
+    states[nfa.match_state + nfa_start_offset]
+        .transitions
+        .push((Transition::CaptureEnd(idx), match_state));
+
     NFA {
         states,
         start_state: 0,

@@ -18,10 +18,10 @@ fn main() {
 
     let nfa = regex::compiler::compile(&pattern);
 
-    if nfa.is_match(&input_line.trim_end()) {
+    let result = nfa.is_match(&input_line.trim_end());
+    if result.is_match {
         process::exit(0);
     } else {
         process::exit(1);
     }
 }
-
