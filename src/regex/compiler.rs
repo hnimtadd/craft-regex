@@ -308,57 +308,73 @@ impl NFA {
                         next_threads.push(next_thread);
                     }
                     Transition::Class(class) => {
-                        let mut consumed = 0;
-                        let is_match = match class {
+                        match class {
                             CharacterClass::Any => {
-                                consumed = 1;
-                                true
+                                let next_thread = MatchThread {
+                                    state_idx: *next_state_idx,
+                                    at_idx: thread.at_idx + 1,
+                                    capturing: thread.capturing.clone(),
+                                    captured: thread.captured.clone(),
+                                };
+                                next_threads.push(next_thread);
                             }
                             CharacterClass::Set { data, is_positive } => {
-                                consumed = 1;
                                 let found = data.binary_search(&c).is_ok();
-                                *is_positive == found
+                                if *is_positive == found {
+                                    let next_thread = MatchThread {
+                                        state_idx: *next_state_idx,
+                                        at_idx: thread.at_idx + 1,
+                                        capturing: thread.capturing.clone(),
+                                        captured: thread.captured.clone(),
+                                    };
+                                    next_threads.push(next_thread);
+                                };
                             }
                             CharacterClass::Digit => {
-                                consumed = 1;
-                                c.is_ascii_digit()
+                                if c.is_ascii_digit() {
+                                    let next_thread = MatchThread {
+                                        state_idx: *next_state_idx,
+                                        at_idx: thread.at_idx + 1,
+                                        capturing: thread.capturing.clone(),
+                                        captured: thread.captured.clone(),
+                                    };
+                                    next_threads.push(next_thread);
+                                };
                             }
                             CharacterClass::Word => {
-                                consumed = 1;
-                                c.is_ascii_alphanumeric() || c == '_'
-                            }
-                            CharacterClass::BackReference(ref_idx) => {
-                                match thread.captured.iter().nth(*ref_idx - 1) {
-                                    Some(cg) => match input
-                                        .get(thread.at_idx..thread.at_idx + (cg.to - cg.from))
-                                    {
-                                        Some(slice) => {
-                                            let br_match = slice == &input[cg.from..cg.to];
-                                            consumed = cg.to - cg.from;
-                                            println!(
-                                                "segment to compare: {}, matched = {}, thread: {:?}, consumed {}",
-                                                slice, br_match, thread, consumed,
-                                            );
-                                            br_match
-                                        }
-                                        None => {
-                                            println!("could not get group matching");
-                                            false
-                                        }
-                                    },
-                                    None => false,
+                                if c.is_ascii_alphanumeric() || c == '_' {
+                                    let next_thread = MatchThread {
+                                        state_idx: *next_state_idx,
+                                        at_idx: thread.at_idx + 1,
+                                        capturing: thread.capturing.clone(),
+                                        captured: thread.captured.clone(),
+                                    };
+                                    next_threads.push(next_thread);
                                 }
                             }
+                            CharacterClass::BackReference(ref_idx) => thread
+                                .captured
+                                .iter()
+                                .filter(|cg| cg.idx == *ref_idx)
+                                .for_each(|cg| {
+                                    println!("matching for br {ref_idx}");
+                                    if let (Some(slice), Some(br_slice)) = (
+                                        input.get(thread.at_idx..thread.at_idx + (cg.to - cg.from)),
+                                        input.get(cg.from..cg.to),
+                                    ) {
+                                        let is_br_match = slice == br_slice;
+                                        if is_br_match {
+                                            let next_thread = MatchThread {
+                                                state_idx: *next_state_idx,
+                                                at_idx: thread.at_idx + cg.to - cg.from,
+                                                capturing: thread.capturing.clone(),
+                                                captured: thread.captured.clone(),
+                                            };
+                                            next_threads.push(next_thread);
+                                        };
+                                    }
+                                }),
                         };
-                        if is_match {
-                            let next_thread = MatchThread {
-                                state_idx: *next_state_idx,
-                                at_idx: thread.at_idx + consumed,
-                                capturing: thread.capturing.clone(),
-                                captured: thread.captured.clone(),
-                            };
-                            next_threads.push(next_thread);
-                        }
                     }
                     _ => {}
                 }
@@ -441,6 +457,7 @@ impl NFA {
 
                             // remove the updated element from capturing and move to captured.
                             let removed_cg = next_thread.capturing.swap_remove(idx);
+                            println!("captured: {removed_cg:?}");
                             next_thread.captured.push(removed_cg);
                         } else {
                             panic!("capture group {} is empty", capture_group_idx);
