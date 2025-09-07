@@ -188,7 +188,7 @@ impl NFA {
             captured: Vec::new(),
         }]);
 
-        for idx in 0..input.chars().count() {
+        for idx in 0..input.chars().count() + 1 {
             if !self.anchors.contains(Anchors::END_OF_STRING) {
                 if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
                     return MatchResult {
