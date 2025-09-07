@@ -23,10 +23,13 @@ pub fn compile(pattern: &str) -> NFA {
 
     // Pass 1: Tokenize the pattern string into a sequence of Tokens.
     let tokens = tokenize(pattern_slice);
+    println!("tokens: {:?}", tokens);
     // Pass 2: Insert explicit concatenation tokens where necessary.
     let tokens_with_concat = insert_concatenation(tokens);
+    println!("tokens_with_concat: {:?}", tokens_with_concat);
     // Pass 3: Reorder the tokens into postfix (RPN) order using Shunting-yard.
     let postfix_tokens = shunting_yard(tokens_with_concat);
+    println!("postfix_tokens: {:?}", postfix_tokens);
 
     // Compile the final token stream into an NFA.
     let mut nfa = postfix_to_nfa(&postfix_tokens);
@@ -276,7 +279,6 @@ impl NFA {
             }
 
             let next_raw_threads = self.consume(threads, input);
-            // println!("next_raw_threads: {:?}", next_raw_threads);
             threads = self.get_epsilon_closure(next_raw_threads);
         }
     }
@@ -565,6 +567,7 @@ fn shunting_yard(tokens: Vec<Token>) -> Vec<Token> {
     for token in tokens {
         match token {
             Token::Literal(_) | Token::Class(_) => {
+                // create new buffer if not
                 let buffer = if let Some(buffer) = buffers.last_mut() {
                     buffer
                 } else {
@@ -609,8 +612,14 @@ fn shunting_yard(tokens: Vec<Token>) -> Vec<Token> {
                 }
                 // it is gurantee to have capture start at this point.
                 assert!(matches!(operators.pop().unwrap(), Token::CaptureStart(_)));
-                output.extend(buffer);
-                output.push(Token::CaptureGroup(idx));
+                let last_buffer = if let Some(last_buffer) = buffers.last_mut() {
+                    last_buffer
+                } else {
+                    buffers.push(Vec::new());
+                    buffers.last_mut().unwrap()
+                };
+                last_buffer.extend(buffer);
+                last_buffer.push(Token::CaptureGroup(idx));
             }
             Token::CaptureGroup(_) => {
                 panic!("this should not happend");
