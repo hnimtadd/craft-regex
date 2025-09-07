@@ -182,13 +182,19 @@ impl NFA {
             at_idx: 0,
             captures: Vec::new(),
         }]);
-        // let mut attempt = 1;
-        // println!("epsilon after {}st try: {:?}", attempt, threads);
-        // attempt += 1;
 
         for idx in 0..input.chars().count() {
             if !self.anchors.contains(Anchors::END_OF_STRING) {
                 if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
+                    return MatchResult {
+                        is_match: true,
+                        capture_groups: th.captures.clone(),
+                    };
+                }
+            } else {
+                if let Some(th) = threads.iter().find(|th| {
+                    th.state_idx == self.match_state && th.at_idx == input.chars().count()
+                }) {
                     return MatchResult {
                         is_match: true,
                         capture_groups: th.captures.clone(),
@@ -203,22 +209,31 @@ impl NFA {
                 state_idx: self.start_state,
                 captures: Vec::new(),
             }]));
-            // println!("epsilon after {}st try: {:?}", attempt, threads);
-            // attempt += 1;
             threads.sort();
             threads.dedup();
         }
 
-        if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
-            return MatchResult {
-                is_match: true,
-                capture_groups: th.captures.clone(),
-            };
-        } else {
-            MatchResult {
-                is_match: false,
-                capture_groups: Vec::new(),
+        if !self.anchors.contains(Anchors::END_OF_STRING) {
+            if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
+                return MatchResult {
+                    is_match: true,
+                    capture_groups: th.captures.clone(),
+                };
             }
+        } else {
+            if let Some(th) = threads
+                .iter()
+                .find(|th| th.state_idx == self.match_state && th.at_idx == input.chars().count())
+            {
+                return MatchResult {
+                    is_match: true,
+                    capture_groups: th.captures.clone(),
+                };
+            }
+        };
+        MatchResult {
+            is_match: false,
+            capture_groups: Vec::new(),
         }
     }
     /// Simulates the NFA against an input string to check for a match.
@@ -231,7 +246,7 @@ impl NFA {
             captures: Vec::new(),
         }]);
 
-        for _ in 0..input.chars().count() {
+        loop {
             if threads.is_empty() {
                 return MatchResult {
                     is_match: false,
@@ -249,22 +264,20 @@ impl NFA {
                         capture_groups: th.captures.clone(),
                     };
                 }
-            };
+            } else {
+                if let Some(th) = threads.iter().find(|th| {
+                    th.state_idx == self.match_state && th.at_idx == input.chars().count()
+                }) {
+                    return MatchResult {
+                        is_match: true,
+                        capture_groups: th.captures.clone(),
+                    };
+                }
+            }
 
             let next_raw_threads = self.consume(threads, input);
+            // println!("next_raw_threads: {:?}", next_raw_threads);
             threads = self.get_epsilon_closure(next_raw_threads);
-        }
-
-        if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
-            return MatchResult {
-                is_match: true,
-                capture_groups: th.captures.clone(),
-            };
-        } else {
-            MatchResult {
-                is_match: false,
-                capture_groups: Vec::new(),
-            }
         }
     }
 
@@ -314,11 +327,11 @@ impl NFA {
                                     {
                                         Some(slice) => {
                                             let br_match = slice == &input[cg.from..cg.to];
-                                            println!(
-                                                "segment to compare: {}, matched = {}, thread: {:?}",
-                                                slice, br_match, thread,
-                                            );
                                             consumed = cg.to - cg.from;
+                                            println!(
+                                                "segment to compare: {}, matched = {}, thread: {:?}, consumed {}",
+                                                slice, br_match, thread, consumed,
+                                            );
                                             br_match
                                         }
                                         None => {
@@ -398,7 +411,6 @@ impl NFA {
                             // to increase idx to 1, so the capture group
                             // could capture the current index.
                             last_cg.to = thread.at_idx;
-                            println!("found capture group: {:?}", last_cg);
                         } else {
                             panic!("capture group {} is empty", capture_group_idx);
                         }
