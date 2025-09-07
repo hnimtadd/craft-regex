@@ -109,7 +109,8 @@ impl State {
 struct MatchThread {
     state_idx: usize,
     at_idx: usize, // the index in string that current thread is working on.
-    captures: Vec<CaptureGroup>,
+    capturing: Vec<CaptureGroup>, // list of capturing group
+    captured: Vec<CaptureGroup>, // list of captured group
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -169,7 +170,7 @@ impl NFA {
         }
     }
     /// Simulates the NFA against an input string to check for a match.
-    pub fn is_match(&self, input: &str) -> MatchResult {
+    pub fn simulate(&self, input: &str) -> MatchResult {
         if self.anchors.contains(Anchors::START_OF_STRING) {
             self.run_match(input)
         } else {
@@ -183,7 +184,8 @@ impl NFA {
         let mut threads = self.get_epsilon_closure(vec![MatchThread {
             state_idx: self.start_state,
             at_idx: 0,
-            captures: Vec::new(),
+            capturing: Vec::new(),
+            captured: Vec::new(),
         }]);
 
         for idx in 0..input.chars().count() {
@@ -191,7 +193,7 @@ impl NFA {
                 if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
                     return MatchResult {
                         is_match: true,
-                        capture_groups: th.captures.clone(),
+                        capture_groups: th.captured.clone(),
                     };
                 }
             } else {
@@ -200,7 +202,7 @@ impl NFA {
                 }) {
                     return MatchResult {
                         is_match: true,
-                        capture_groups: th.captures.clone(),
+                        capture_groups: th.captured.clone(),
                     };
                 }
             }
@@ -210,7 +212,8 @@ impl NFA {
             threads.extend(self.get_epsilon_closure(vec![MatchThread {
                 at_idx: idx,
                 state_idx: self.start_state,
-                captures: Vec::new(),
+                capturing: Vec::new(),
+                captured: Vec::new(),
             }]));
             threads.sort();
             threads.dedup();
@@ -220,7 +223,7 @@ impl NFA {
             if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
                 return MatchResult {
                     is_match: true,
-                    capture_groups: th.captures.clone(),
+                    capture_groups: th.captured.clone(),
                 };
             }
         } else {
@@ -230,7 +233,7 @@ impl NFA {
             {
                 return MatchResult {
                     is_match: true,
-                    capture_groups: th.captures.clone(),
+                    capture_groups: th.captured.clone(),
                 };
             }
         };
@@ -246,7 +249,8 @@ impl NFA {
         let mut threads = self.get_epsilon_closure(vec![MatchThread {
             state_idx: self.start_state,
             at_idx: 0,
-            captures: Vec::new(),
+            capturing: Vec::new(),
+            captured: Vec::new(),
         }]);
 
         loop {
@@ -264,7 +268,7 @@ impl NFA {
                 if let Some(th) = threads.iter().find(|th| th.state_idx == self.match_state) {
                     return MatchResult {
                         is_match: true,
-                        capture_groups: th.captures.clone(),
+                        capture_groups: th.captured.clone(),
                     };
                 }
             } else {
@@ -273,7 +277,7 @@ impl NFA {
                 }) {
                     return MatchResult {
                         is_match: true,
-                        capture_groups: th.captures.clone(),
+                        capture_groups: th.captured.clone(),
                     };
                 }
             }
@@ -298,7 +302,8 @@ impl NFA {
                         let next_thread = MatchThread {
                             state_idx: *next_state_idx,
                             at_idx: thread.at_idx + 1,
-                            captures: thread.captures.clone(),
+                            capturing: thread.capturing.clone(),
+                            captured: thread.captured.clone(),
                         };
                         next_threads.push(next_thread);
                     }
@@ -323,7 +328,7 @@ impl NFA {
                                 c.is_ascii_alphanumeric() || c == '_'
                             }
                             CharacterClass::BackReference(ref_idx) => {
-                                match thread.captures.iter().nth(*ref_idx - 1) {
+                                match thread.capturing.iter().nth(*ref_idx - 1) {
                                     Some(cg) => match input
                                         .get(thread.at_idx..thread.at_idx + (cg.to - cg.from))
                                     {
@@ -349,7 +354,8 @@ impl NFA {
                             let next_thread = MatchThread {
                                 state_idx: *next_state_idx,
                                 at_idx: thread.at_idx + consumed,
-                                captures: thread.captures.clone(),
+                                capturing: thread.capturing.clone(),
+                                captured: thread.captured.clone(),
                             };
                             next_threads.push(next_thread);
                         }
@@ -373,7 +379,7 @@ impl NFA {
 
         let mut closures = Vec::new();
 
-        while let Some(mut thread) = to_visit.pop_front() {
+        while let Some(thread) = to_visit.pop_front() {
             closures.push(thread.clone());
 
             // Iterate over the transition of the current thread's state.
@@ -383,7 +389,8 @@ impl NFA {
                         let next_thread = MatchThread {
                             at_idx: thread.at_idx,
                             state_idx: *next_state_idx,
-                            captures: thread.captures.clone(),
+                            captured: thread.captured.clone(),
+                            capturing: thread.capturing.clone(),
                         };
                         if visited.insert(next_thread.clone()) {
                             // if this one is not in visited before, add it to
@@ -395,7 +402,7 @@ impl NFA {
                     // into it, or not.
                     Transition::CaptureStart(capture_group_idx) => {
                         let mut next_thread = thread.clone();
-                        next_thread.captures.push(CaptureGroup {
+                        next_thread.capturing.push(CaptureGroup {
                             idx: *capture_group_idx,
                             from: thread.at_idx,
                             to: 0,
@@ -408,20 +415,36 @@ impl NFA {
                         }
                     }
                     Transition::CaptureEnd(capture_group_idx) => {
-                        if let Some(last_cg) = thread.captures.last_mut() {
+                        let mut next_thread = MatchThread {
+                            state_idx: *next_state_idx,
+                            at_idx: thread.at_idx,
+                            capturing: thread.capturing.clone(),
+                            captured: thread.captured.clone(),
+                        };
+
+                        // try to find the right most capturing group of
+                        // capture_group_idx, then push this capture to
+                        // thread.captured with updated slicing index.
+                        if let Some(idx) = next_thread
+                            .capturing
+                            .iter()
+                            .rposition(|cg| cg.idx == *capture_group_idx)
+                        {
+                            // this is ensured not to panic as the idx is valid at
+                            // this point.
+                            let cg = next_thread.capturing.get_mut(idx).unwrap();
+
                             // string slicing end idx is exclusive, so we have
                             // to increase idx to 1, so the capture group
                             // could capture the current index.
-                            last_cg.to = thread.at_idx;
+                            cg.to = thread.at_idx;
+
+                            // remove the updated element from capturing and move to captured.
+                            let removed_cg = next_thread.capturing.swap_remove(idx);
+                            next_thread.captured.push(removed_cg);
                         } else {
                             panic!("capture group {} is empty", capture_group_idx);
                         }
-
-                        let next_thread = MatchThread {
-                            state_idx: *next_state_idx,
-                            at_idx: thread.at_idx,
-                            captures: thread.captures.clone(),
-                        };
 
                         if visited.insert(next_thread.clone()) {
                             // if this one is not in visited before, add it to
@@ -455,6 +478,7 @@ fn tokenize(pattern: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut chars = pattern.chars().peekable();
     let mut capture_group_count = 0;
+    let mut groups = Vec::new();
 
     while let Some(c) = chars.next() {
         match c {
@@ -465,11 +489,12 @@ fn tokenize(pattern: &str) -> Vec<Token> {
             '.' => tokens.push(Token::Class(CharacterClass::Any)),
             '(' => {
                 capture_group_count += 1;
+                groups.push(capture_group_count);
                 tokens.push(Token::CaptureStart(capture_group_count));
             }
             ')' => {
-                tokens.push(Token::CaptureEnd(capture_group_count));
-                capture_group_count -= 1;
+                let capture_group = groups.pop().unwrap();
+                tokens.push(Token::CaptureEnd(capture_group));
             }
             '[' => {
                 let mut set = Vec::new();
