@@ -328,7 +328,7 @@ impl NFA {
                                 c.is_ascii_alphanumeric() || c == '_'
                             }
                             CharacterClass::BackReference(ref_idx) => {
-                                match thread.capturing.iter().nth(*ref_idx - 1) {
+                                match thread.captured.iter().nth(*ref_idx - 1) {
                                     Some(cg) => match input
                                         .get(thread.at_idx..thread.at_idx + (cg.to - cg.from))
                                     {
