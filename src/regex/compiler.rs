@@ -182,6 +182,9 @@ impl NFA {
             at_idx: 0,
             captures: Vec::new(),
         }]);
+        // let mut attempt = 1;
+        // println!("epsilon after {}st try: {:?}", attempt, threads);
+        // attempt += 1;
 
         for idx in 0..input.chars().count() {
             if !self.anchors.contains(Anchors::END_OF_STRING) {
@@ -193,13 +196,15 @@ impl NFA {
                 }
             }
 
-            let next_raw_threads = self.consume(threads, input);
-            threads = self.get_epsilon_closure(next_raw_threads);
+            let next_raw_threads = self.consume(threads.clone(), input);
+            threads.extend(self.get_epsilon_closure(next_raw_threads));
             threads.extend(self.get_epsilon_closure(vec![MatchThread {
                 at_idx: idx,
                 state_idx: self.start_state,
                 captures: Vec::new(),
             }]));
+            // println!("epsilon after {}st try: {:?}", attempt, threads);
+            // attempt += 1;
             threads.sort();
             threads.dedup();
         }
@@ -285,6 +290,15 @@ impl NFA {
                     Transition::Class(class) => {
                         let mut consumed = 0;
                         let is_match = match class {
+                            CharacterClass::Any => {
+                                consumed = 1;
+                                true
+                            }
+                            CharacterClass::Set { data, is_positive } => {
+                                consumed = 1;
+                                let found = data.binary_search(&c).is_ok();
+                                *is_positive == found
+                            }
                             CharacterClass::Digit => {
                                 consumed = 1;
                                 c.is_ascii_digit()
@@ -314,11 +328,6 @@ impl NFA {
                                     },
                                     None => false,
                                 }
-                            }
-                            CharacterClass::Any => true,
-                            CharacterClass::Set { data, is_positive } => {
-                                let found = data.binary_search(&c).is_ok();
-                                *is_positive == found
                             }
                         };
                         if is_match {
@@ -367,6 +376,8 @@ impl NFA {
                             to_visit.push_back(next_thread);
                         }
                     }
+                    // at capture start, we could have 2 decisions, or step
+                    // into it, or not.
                     Transition::CaptureStart(capture_group_idx) => {
                         let mut next_thread = thread.clone();
                         next_thread.captures.push(CaptureGroup {
@@ -387,6 +398,7 @@ impl NFA {
                             // to increase idx to 1, so the capture group
                             // could capture the current index.
                             last_cg.to = thread.at_idx;
+                            println!("found capture group: {:?}", last_cg);
                         } else {
                             panic!("capture group {} is empty", capture_group_idx);
                         }
