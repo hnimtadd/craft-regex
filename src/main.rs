@@ -37,12 +37,11 @@ fn main() {
                     is_match = true;
                 }
             }
-
-            if is_match {
-                process::exit(0);
-            } else {
-                process::exit(1);
-            }
+        }
+        if is_match {
+            process::exit(0);
+        } else {
+            process::exit(1);
         }
     } else {
         let mut input = String::new();

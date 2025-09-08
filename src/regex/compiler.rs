@@ -172,7 +172,9 @@ impl NFA {
     }
     /// Simulates the NFA against an input string to check for a match.
     pub fn simulate(&self, input: &str) -> MatchResult {
+        log::debug!("matching: {}", input);
         if self.anchors.contains(Anchors::START_OF_STRING) {
+            log::debug!("input contains start of string anchor, match from begining");
             self.run_match(input)
         } else {
             self.run_search(input)
