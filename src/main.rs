@@ -1,3 +1,4 @@
+use log;
 use std::env;
 use std::fs::File;
 use std::io;
@@ -5,12 +6,19 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::process;
 
+mod logger;
 mod regex;
 
 // Usage: echo <input_text> | your_program.sh -E <pattern>
 fn main() {
+    let is_debug = if let Result::Ok(val) = env::var("debug") {
+        val.eq_ignore_ascii_case("true") || val == "1" || val.eq_ignore_ascii_case("yes")
+    } else {
+        false
+    };
+    logger::logger::Logger::init(is_debug);
     if env::args().nth(1).unwrap() != "-E" {
-        println!("Expected first argument to be '-E'");
+        log::error!("Expected first argument to be '-E'");
         process::exit(1);
     }
     let pattern = env::args().nth(2).unwrap();
@@ -31,7 +39,7 @@ fn main() {
         io::stdin().read_line(&mut input).unwrap();
         let result = nfa.simulate(&input);
         if result.is_match {
-            println!("{:?}", result.capture_groups);
+            log::info!("{:?}", result.capture_groups);
             // for cg in result.capture_groups {
             //     println!(
             //         "group: {}, from: {}, to: {}, match: {}",

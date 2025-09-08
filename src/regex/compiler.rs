@@ -1,3 +1,4 @@
+use log;
 use std::{
     collections::{HashSet, VecDeque},
     fmt::{self},
@@ -23,20 +24,20 @@ pub fn compile(pattern: &str) -> NFA {
 
     // Pass 1: Tokenize the pattern string into a sequence of Tokens.
     let tokens = tokenize(pattern_slice);
-    println!("tokens: {:?}", tokens);
+    log::debug!("tokens: {:?}", tokens);
     // Pass 2: Insert explicit concatenation tokens where necessary.
     let tokens_with_concat = insert_concatenation(tokens);
-    println!("tokens_with_concat: {:?}", tokens_with_concat);
+    log::debug!("tokens_with_concat: {:?}", tokens_with_concat);
     // Pass 3: Reorder the tokens into postfix (RPN) order using Shunting-yard.
     let postfix_tokens = shunting_yard(tokens_with_concat);
-    println!("postfix_tokens: {:?}", postfix_tokens);
+    log::debug!("postfix: {:?}", postfix_tokens);
 
     // Compile the final token stream into an NFA.
     let mut nfa = postfix_to_nfa(&postfix_tokens);
     // Attach the detected anchors to the final NFA.
     nfa.anchors = anchors;
 
-    println!("nfa: {:#?}", nfa);
+    log::debug!("nfa: {:#?}", nfa);
     nfa
 }
 
@@ -357,7 +358,7 @@ impl NFA {
                                 .iter()
                                 .filter(|cg| cg.idx == *ref_idx)
                                 .for_each(|cg| {
-                                    println!("matching for br {ref_idx}");
+                                    log::debug!("matching for br {ref_idx}");
                                     if let (Some(slice), Some(br_slice)) = (
                                         input.get(thread.at_idx..thread.at_idx + (cg.to - cg.from)),
                                         input.get(cg.from..cg.to),
@@ -457,7 +458,7 @@ impl NFA {
 
                             // remove the updated element from capturing and move to captured.
                             let removed_cg = next_thread.capturing.swap_remove(idx);
-                            println!("captured: {removed_cg:?}");
+                            log::debug!("captured: {removed_cg:?}");
                             next_thread.captured.push(removed_cg);
                         } else {
                             panic!("capture group {} is empty", capture_group_idx);
