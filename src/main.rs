@@ -27,11 +27,21 @@ fn main() {
     if let Some(path) = env::args().nth(3) {
         let f = File::open(path.as_str()).unwrap();
         let r = BufReader::new(f);
+        let mut is_match = false;
         for line_result in r.lines() {
             let line = line_result.unwrap(); // Check each line for an I/O error
             let result = nfa.simulate(&line);
             if result.is_match {
                 println!("{}", line);
+                if is_match == false {
+                    is_match = true;
+                }
+            }
+
+            if is_match {
+                process::exit(0);
+            } else {
+                process::exit(1);
             }
         }
     } else {

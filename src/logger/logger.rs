@@ -12,13 +12,7 @@ impl log::Log for Logger {
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
             // Write to stderr, which is a common practice for logging.
-            let _ = writeln!(
-                &mut io::stderr(),
-                "Regex [{}] {}: {}",
-                record.level(),
-                record.target(),
-                record.args()
-            );
+            let _ = writeln!(&mut io::stderr(), "{}", record.args());
         }
     }
     fn flush(&self) {}
