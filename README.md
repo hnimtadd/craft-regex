@@ -17,8 +17,8 @@ The regex engine supports a subset of modern regex syntax:
 - [x] **`\d`**: Matches any digit (`[0-9]`).
 - [x] **`[...]`**: Positive character groups (e.g., `[abc]`, `[a-z]`).
 - [x] **`[^...]`**: Negative character groups (e.g., `[^abc]`)
-- [ ] **`^`**: Start of string anchor (e.g., `^abc`)
-- [ ] **`$`**: End of string anchor (e.g., `abc$`)
+- [x] **`^`**: Start of string anchor (e.g., `^abc`)
+- [x] **`$`**: End of string anchor (e.g., `abc$`)
 
 ## Usage
 
