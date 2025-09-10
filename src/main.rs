@@ -64,7 +64,7 @@ struct Args {
     #[arg(short, default_value_t = false)]
     recursive: bool,
 
-    #[arg(required = true)]
+    #[arg(required = false)]
     targets: Vec<String>,
 }
 
